@@ -30,6 +30,7 @@ public class AdminController : ControllerBase
     private readonly IOptionsMonitor<SoulseekSettings> _soulseekOpts;
     private readonly IOptionsMonitor<LastFmSettings> _lastFmOpts;
     private readonly IOptionsMonitor<NotificationSettings> _notificationOpts;
+    private readonly IOptionsMonitor<ServerSettings> _serverOpts;
     private readonly Octo.Services.Notifications.NotificationService _notifications;
     private readonly IConfiguration _config;
     private readonly SoulseekClient _slskd;
@@ -51,6 +52,7 @@ public class AdminController : ControllerBase
         IOptionsMonitor<SoulseekSettings> soulseekOpts,
         IOptionsMonitor<LastFmSettings> lastFmOpts,
         IOptionsMonitor<NotificationSettings> notificationOpts,
+        IOptionsMonitor<ServerSettings> serverOpts,
         Octo.Services.Notifications.NotificationService notifications,
         IConfiguration config,
         SoulseekClient slskd,
@@ -73,6 +75,7 @@ public class AdminController : ControllerBase
         _soulseekOpts = soulseekOpts;
         _lastFmOpts = lastFmOpts;
         _notificationOpts = notificationOpts;
+        _serverOpts = serverOpts;
         _notifications = notifications;
         _config = config;
         _slskd = slskd;
@@ -321,6 +324,10 @@ public class AdminController : ControllerBase
             {
                 ["DownloadPath"] = _config["Library:DownloadPath"] ?? "/music",
             },
+            ["Server"] = new Dictionary<string, object>
+            {
+                ["PublicUrl"] = _serverOpts.CurrentValue.PublicUrl ?? "",
+            },
             ["Soulseek"] = new Dictionary<string, object>
             {
                 ["BaseUrl"] = soulseek.BaseUrl ?? "",
@@ -428,6 +435,7 @@ public class AdminController : ControllerBase
         var soulseek = _soulseekOpts.CurrentValue;
         var lastfm = _lastFmOpts.CurrentValue;
         var notif = _notificationOpts.CurrentValue;
+        var server = _serverOpts.CurrentValue;
 
         var effective = new JsonObject
         {
@@ -453,6 +461,13 @@ public class AdminController : ControllerBase
             ["Library"] = new JsonObject
             {
                 ["DownloadPath"] = _config["Library:DownloadPath"] ?? "/music",
+            },
+            // Must be listed here even though nothing reads it back: PUT writes
+            // this document wholesale, so a section missing from the GET is a
+            // section the next plain Save silently deletes.
+            ["Server"] = new JsonObject
+            {
+                ["PublicUrl"] = server.PublicUrl ?? "",
             },
             ["Soulseek"] = new JsonObject
             {
@@ -561,6 +576,7 @@ public class AdminController : ControllerBase
             "Subsonic:CacheDurationHours", "Subsonic:EnableExternalPlaylists",
             "Subsonic:PlaylistsDirectory",
             "Library:DownloadPath",
+            "Server:PublicUrl",
             "Soulseek:BaseUrl", "Soulseek:Username", "Soulseek:Password",
             "Soulseek:SearchWaitSeconds", "Soulseek:MinFileSizeBytes",
             "Soulseek:PreferredExtension", "Soulseek:DownloadTimeoutSeconds",

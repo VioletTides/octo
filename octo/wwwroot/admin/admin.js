@@ -129,6 +129,7 @@ async function loadSettings() {
     slskdLink.textContent = `${here.hostname}:5030`;
   }
 
+  renderOctoAddresses();
   updateDiscoveryBanner();
   buildSegments();
   syncSegments(false);
@@ -206,6 +207,7 @@ document.querySelectorAll('form[data-section]').forEach(form => {
       if (!r.ok) throw new Error(result.error || `HTTP ${r.status}`);
 
       currentSettings = await (await fetch('/api/admin/settings')).json();
+      renderOctoAddresses();
       status.textContent = `Saved · ${new Date().toLocaleTimeString()}`;
       form.querySelector('.form-actions')?.classList.remove('dirty');
       toast(needsRestart
@@ -789,19 +791,52 @@ window.addEventListener('resize', () => syncSegments(false));
 // ────────────────────────────────────────────────────────────────
 // "Point your apps at Octo" address + copy
 // ────────────────────────────────────────────────────────────────
-(function initOctoAddress() {
-  const el = document.getElementById('octo-address');
-  if (!el) return;
-  const here = new URL(location.href);
-  const addr = `${here.protocol}//${here.hostname}:${here.port || '5274'}`;
-  el.textContent = addr;
-  document.getElementById('copy-octo-address')?.addEventListener('click', async () => {
+// The local address is derived, because that one genuinely moves: a DHCP lease
+// changes it and nobody memorises a container IP. The remote address is not
+// derived, because it cannot be. Octo does see the public hostname on relayed
+// Subsonic calls, but only /admin would display it and a sane proxy setup keeps
+// /admin off the public internet, so the value never reaches the page that wants
+// it. Detecting it would also be answering a question nobody has: whoever set up
+// the proxy picked that hostname and has already typed it into a client. So it is
+// stored, not discovered, and the row stays hidden until they store it.
+function normalizeAddress(raw) {
+  const v = (raw || '').trim().replace(/\/+$/, '');
+  if (!v) return '';
+  return /^https?:\/\//i.test(v) ? v : `https://${v}`;
+}
+
+function bindCopy(buttonId, getAddress) {
+  document.getElementById(buttonId)?.addEventListener('click', async () => {
+    const addr = getAddress();
+    if (!addr) return;
     try {
       await navigator.clipboard.writeText(addr);
       if (typeof toast === 'function') toast('Address copied.', 'ok');
     } catch { /* clipboard blocked; user can select manually */ }
   });
-})();
+}
+
+function localOctoAddress() {
+  const here = new URL(location.href);
+  return `${here.protocol}//${here.hostname}:${here.port || '5274'}`;
+}
+
+function renderOctoAddresses() {
+  const el = document.getElementById('octo-address');
+  if (el) el.textContent = localOctoAddress();
+
+  const row = document.getElementById('octo-public-address-row');
+  const code = document.getElementById('octo-public-address');
+  if (!row || !code) return;
+  const publicAddr = normalizeAddress(currentSettings?.Server?.PublicUrl);
+  code.textContent = publicAddr;
+  row.hidden = !publicAddr;
+}
+
+bindCopy('copy-octo-address', localOctoAddress);
+bindCopy('copy-octo-public-address',
+  () => normalizeAddress(currentSettings?.Server?.PublicUrl));
+renderOctoAddresses();
 
 // ────────────────────────────────────────────────────────────────
 // Boot

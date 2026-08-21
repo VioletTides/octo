@@ -44,6 +44,8 @@ builder.Services.Configure<LastFmSettings>(
     builder.Configuration.GetSection("LastFm"));
 builder.Services.Configure<NotificationSettings>(
     builder.Configuration.GetSection("Notifications"));
+builder.Services.Configure<ServerSettings>(
+    builder.Configuration.GetSection("Server"));
 
 builder.Services.AddSingleton<ILocalLibraryService, LocalLibraryService>();
 
