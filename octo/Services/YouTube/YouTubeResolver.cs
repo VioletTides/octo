@@ -23,7 +23,23 @@ public class YouTubeResolver
     {
         _httpClientFactory = httpClientFactory;
         _logger = logger;
-        _baseUrl = (configuration.GetValue<string>("YouTube:ShimUrl") ?? "http://yt-dlp-shim:8080").TrimEnd('/');
+        _baseUrl = ResolveBaseUrl(configuration.GetValue<string>("YouTube:ShimUrl"));
+    }
+
+    /// <summary>
+    /// The shim address every request is built on. Falls back to the compose
+    /// service name when the setting is absent OR blank: the admin UI saves a
+    /// cleared field as "", and "" is not null, so a plain null-coalesce left
+    /// every request relative and the factory client with no base address.
+    /// </summary>
+    public string BaseUrl => _baseUrl;
+
+    internal const string DefaultBaseUrl = "http://yt-dlp-shim:8080";
+
+    internal static string ResolveBaseUrl(string? configured)
+    {
+        var value = string.IsNullOrWhiteSpace(configured) ? DefaultBaseUrl : configured.Trim();
+        return value.TrimEnd('/');
     }
 
     /// <summary>
