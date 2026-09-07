@@ -173,18 +173,20 @@ public sealed class LastFmRadioStreamService
     /// order from wherever the pool ends.</summary>
     public IReadOnlyList<PreparedRadioTrack> GetReadyPool(LastFmRadioStreamSession session)
     {
-        var ready = new List<PreparedRadioTrack>();
-        var candidates = Candidates(session);
-        if (candidates.Count == 0) return ready;
-        var start = _tuneIn.Start(candidates.Count) % candidates.Count;
-        for (var offset = 0; offset < candidates.Count; offset++)
+        // Rotate among the tracks that are actually cached, not among the whole
+        // snapshot: with three cached out of twenty, a start drawn over twenty lands on
+        // the first cached track seventeen times in twenty.
+        var cached = new List<PreparedRadioTrack>();
+        foreach (var candidate in Candidates(session))
         {
-            var candidate = candidates[(start + offset) % candidates.Count];
             var path = _cache.GetReadyPath(candidate.Key);
-            if (path is null) continue;
-            ready.Add(candidate.Prepared(path));
-            if (ready.Count == ReadyPoolSize) break;
+            if (path is not null) cached.Add(candidate.Prepared(path));
         }
+        if (cached.Count == 0) return cached;
+        var start = _tuneIn.Start(cached.Count) % cached.Count;
+        var ready = new List<PreparedRadioTrack>(ReadyPoolSize);
+        for (var offset = 0; offset < cached.Count && ready.Count < ReadyPoolSize; offset++)
+            ready.Add(cached[(start + offset) % cached.Count]);
         return ready;
     }
 
