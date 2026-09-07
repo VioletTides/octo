@@ -841,6 +841,25 @@ section[data-pane].active { display: block; }
   color: var(--accent-hover);
   letter-spacing: 0.01em;
 }
+/* Fixed-width label so the local and remote rows line up as a pair. */
+.callout-address-label {
+  font-size: 12px;
+  color: var(--fg-mute);
+  min-width: 104px;
+  flex: 0 0 auto;
+}
+.callout-form {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.callout-form .callout-address-label {
+  display: block;
+  min-width: 0;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+.callout-form .set-inline { max-width: 440px; }
 
 /* ══════════════════════════════════════════════════════════════ */
 /*  Settings design system (StreamNook "Winters' Glass" patterns)   */

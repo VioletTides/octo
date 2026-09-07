@@ -149,13 +149,29 @@
             Octo sits in front of Navidrome. In Feishin, Symfonium, Arpeggi, or any Subsonic app,
             set the <strong>server address</strong> to Octo:
           </p>
-          <div class="callout-address"><code id="octo-address">http://this-host:5274</code>
+          <div class="callout-address">
+            <span class="callout-address-label">On this network</span>
+            <code id="octo-address">http://this-host:5274</code>
             <button type="button" class="btn btn-ghost" id="copy-octo-address">Copy</button>
+          </div>
+          <div class="callout-address" id="octo-public-address-row" hidden>
+            <span class="callout-address-label">Away from home</span>
+            <code id="octo-public-address"></code>
+            <button type="button" class="btn btn-ghost" id="copy-octo-public-address">Copy</button>
           </div>
           <p class="callout-fine">
             Use your Subsonic username and password as usual. If an app points straight at Navidrome
             it bypasses Octo, and discovery and download-on-star won't work.
           </p>
+          <form data-section="server" class="callout-form">
+            <label class="callout-address-label" for="f-public-url">
+              Reachable from outside your network? Save the address here so it is always to hand.
+            </label>
+            <div class="set-inline">
+              <input class="set-input" id="f-public-url" name="Server.PublicUrl"
+                     placeholder="https://music.example.com" autocomplete="off" />
+            </div>
+          </form>
         </div>
 
         <div class="status-grid" id="status-grid">
