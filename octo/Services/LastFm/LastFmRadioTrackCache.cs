@@ -80,6 +80,33 @@ public sealed class LastFmRadioTrackCache
 
     public bool IsReadyPath(string path) => IsReady(path);
 
+    /// <summary>The measured profile of a cached track sits beside it as JSON. Absent
+    /// (an older cache, or a measurement that failed) means "unknown", never an error.</summary>
+    public RadioAudioProfile? GetProfile(string path)
+    {
+        var sidecar = ProfilePath(path);
+        if (!File.Exists(sidecar)) return null;
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<RadioAudioProfile>(File.ReadAllText(sidecar));
+        }
+        catch { return null; }
+    }
+
+    public void SaveProfile(string path, RadioAudioProfile profile)
+    {
+        try
+        {
+            var sidecar = ProfilePath(path);
+            var temporary = sidecar + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            File.WriteAllText(temporary, System.Text.Json.JsonSerializer.Serialize(profile));
+            File.Move(temporary, sidecar, overwrite: true);
+        }
+        catch { /* the profile is an optimisation; the audio is what matters */ }
+    }
+
+    private static string ProfilePath(string path) => path + ".json";
+
     private static bool IsReady(string path) => File.Exists(path) && new FileInfo(path).Length > 0;
 
     private static string Touch(string path)
@@ -116,7 +143,13 @@ public sealed class LastFmRadioTrackCache
 
     private static bool TryDelete(FileInfo file)
     {
-        try { file.Delete(); return true; }
+        try
+        {
+            file.Delete();
+            var sidecar = ProfilePath(file.FullName);
+            if (File.Exists(sidecar)) File.Delete(sidecar);
+            return true;
+        }
         catch { return false; }
     }
 }

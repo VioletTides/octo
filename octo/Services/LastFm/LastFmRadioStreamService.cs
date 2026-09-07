@@ -113,7 +113,7 @@ public sealed class LastFmRadioStreamService
                 _sessions.ConsumeReadyTrack(session.Token, prepared.CacheKey);
                 var reserved = queue.Select(item => item.CacheKey).ToHashSet(StringComparer.Ordinal);
                 var replenishment = PrepareNextAsync(session, nextIndex, reserved,
-                    CancellationToken.None);
+                    CancellationToken.None, _cache.GetProfile(prepared.Path));
                 _ = PersistReplenishmentAsync(session.Token, replenishment);
 
                 try
@@ -292,10 +292,34 @@ public sealed class LastFmRadioStreamService
     }
 
     private async Task<PreparedRadioTrack?> PrepareNextAsync(LastFmRadioStreamSession session,
-        int startIndex, IReadOnlySet<string> reserved, CancellationToken cancellationToken)
+        int startIndex, IReadOnlySet<string> reserved, CancellationToken cancellationToken,
+        RadioAudioProfile? current = null)
     {
         var candidates = Candidates(session);
         if (candidates.Count == 0) return null;
+
+        // Flow: look at the next few unreserved tracks and, where their profiles are
+        // known, lead with the one that follows the current track most smoothly. The
+        // rest of the window is not skipped, only deferred: the scan below starts at
+        // the chosen one and wraps, so an unchosen track is still next in line.
+        var window = new List<RadioCandidate>();
+        for (var offset = 0; offset < candidates.Count && window.Count < FlowWindow; offset++)
+        {
+            var candidate = candidates[(startIndex + offset) % candidates.Count];
+            if (!reserved.Contains(candidate.Key)) window.Add(candidate);
+        }
+        var lead = ChooseByFlow(current, window.Select(candidate =>
+        {
+            var path = _cache.GetReadyPath(candidate.Key);
+            return path is null ? null : _cache.GetProfile(path);
+        }).ToList());
+        if (lead > 0)
+        {
+            _logger.LogDebug("Radio flow chose {Artist} - {Title} over the next in snapshot order",
+                window[lead].Track.Artist, window[lead].Track.Title);
+            startIndex = window[lead].Index;
+        }
+
         for (var offset = 0; offset < candidates.Count; offset++)
         {
             var candidate = candidates[(startIndex + offset) % candidates.Count];
@@ -318,7 +342,9 @@ public sealed class LastFmRadioStreamService
         LastFmRadioStreamSession session, RadioCandidate candidate,
         CancellationToken cancellationToken, bool externalOnly = false)
     {
-        var bitrateKbps = _settings.CurrentValue.EffectiveRadioStreamBitrateKbps;
+        var settings = _settings.CurrentValue;
+        var bitrateKbps = settings.EffectiveRadioStreamBitrateKbps;
+        RadioAudioProfile? profile = null;
         var path = await _cache.GetOrCreateAsync(candidate.Key, async (output, token) =>
         {
             var opened = externalOnly
@@ -326,10 +352,51 @@ public sealed class LastFmRadioStreamService
                 : await OpenTrackAsync(candidate.Track, session.Authentication, token);
             if (opened is null) throw new InvalidOperationException("No playable source");
             await using (opened.Source.AudioStream)
-                await _transcoder.TranscodeToMp3Async(opened.Source.AudioStream, output,
-                    bitrateKbps, token);
+                profile = await _transcoder.TranscodeToMp3Async(opened.Source.AudioStream, output,
+                    bitrateKbps, settings.EffectiveRadioLoudnessTarget, token);
         }, cancellationToken);
+        // Only the producer holds a profile; joiners of the same single-flight get the
+        // path and read the sidecar the producer writes here.
+        if (profile is not null) _cache.SaveProfile(path, profile);
         return candidate.Prepared(path);
+    }
+
+    /// <summary>How many upcoming snapshot tracks the flow picker may choose between.</summary>
+    internal const int FlowWindow = 4;
+
+    /// <summary>
+    /// How far apart two tracks sound, from their measured profiles: brightness as
+    /// octaves between spectral centroids, dynamics as loudness range, texture as
+    /// spectral flatness. Loudness itself is not a term because every track has been
+    /// brought to the same level before it reaches the stream.
+    /// </summary>
+    internal static double FlowDistance(RadioAudioProfile current, RadioAudioProfile next)
+    {
+        var brightness = Math.Abs(Math.Log2(Math.Max(20, next.SpectralCentroidHz)
+            / Math.Max(20, current.SpectralCentroidHz)));
+        var dynamics = Math.Abs(next.LoudnessRangeLu - current.LoudnessRangeLu) / 5d;
+        var texture = Math.Abs(next.SpectralFlatness - current.SpectralFlatness) * 5d;
+        return brightness + dynamics + texture;
+    }
+
+    /// <summary>
+    /// Among the next few snapshot tracks, the one that follows the current track most
+    /// smoothly. Only tracks that are already cached and measured can be compared; when
+    /// none is, or there is nothing to compare against, the answer is snapshot order,
+    /// which is what the stream did before profiles existed.
+    /// </summary>
+    internal static int ChooseByFlow(RadioAudioProfile? current, IReadOnlyList<RadioAudioProfile?> window)
+    {
+        if (current is null || window.Count == 0) return 0;
+        var best = 0;
+        var bestDistance = double.PositiveInfinity;
+        for (var offset = 0; offset < window.Count; offset++)
+        {
+            if (window[offset] is not { } profile) continue;
+            var distance = FlowDistance(current, profile);
+            if (distance < bestDistance) { bestDistance = distance; best = offset; }
+        }
+        return double.IsPositiveInfinity(bestDistance) ? 0 : best;
     }
 
     private List<RadioCandidate> Candidates(LastFmRadioStreamSession session)

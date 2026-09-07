@@ -164,10 +164,10 @@ public class LastFmRadioCoreTests
         var transcoder = new FfmpegLastFmRadioAudioTranscoder();
         await using var output = new MemoryStream();
         await using var firstInput = WavSilence();
-        await transcoder.TranscodeToMp3Async(firstInput, output, 192, CancellationToken.None);
+        await transcoder.TranscodeToMp3Async(firstInput, output, 192, -16, CancellationToken.None);
         var boundary = checked((int)output.Length);
         await using var secondInput = WavSilence();
-        await transcoder.TranscodeToMp3Async(secondInput, output, 192, CancellationToken.None);
+        await transcoder.TranscodeToMp3Async(secondInput, output, 192, null, CancellationToken.None);
         var bytes = output.ToArray();
         Assert.True(boundary > 100);
         Assert.True(bytes.Length > boundary + 100);
@@ -221,10 +221,68 @@ public class LastFmRadioCoreTests
         return value;
     }
 
-    private static MemoryStream WavSilence()
+    [Theory]
+    [InlineData(-10.7, -16.0, -5.3)]
+    [InlineData(-24.0, -16.0, 8.0)]
+    [InlineData(-40.0, -16.0, 18.0)]
+    [InlineData(-10.0, double.NaN, 0.0)]
+    [InlineData(double.NaN, -16.0, 0.0)]
+    [InlineData(double.NegativeInfinity, -16.0, 0.0)]
+    public void Gain_TakesTheMeasurementToTheTargetWithinBounds(double measured, double target, double expected) =>
+        Assert.Equal(expected, FfmpegLastFmRadioAudioTranscoder.GainFor(
+            double.IsNaN(measured) ? null : measured, double.IsNaN(target) ? null : target), 2);
+
+    [Fact]
+    public async Task FfmpegTranscoder_BringsATrackToTheLoudnessTargetAndReportsItsProfile()
+    {
+        // A -6 dBFS sine sits far above -16 LUFS; a 1 kHz tone puts the centroid at 1 kHz.
+        var transcoder = new FfmpegLastFmRadioAudioTranscoder();
+        await using var output = new MemoryStream();
+        await using var input = WavTone(seconds: 4, amplitude: 0.5, frequencyHz: 1000);
+        var profile = await transcoder.TranscodeToMp3Async(input, output, 192, -16, CancellationToken.None);
+
+        Assert.NotNull(profile);
+        Assert.True(profile!.IntegratedLufs > -12, $"source measured {profile.IntegratedLufs} LUFS");
+        Assert.InRange(profile.GainDb, -12, -2);
+        Assert.InRange(profile.SpectralCentroidHz, 700, 1400);
+
+        // Re-measure the encoded output: it should now sit at the target.
+        var encoded = Path.Combine(Path.GetTempPath(), "octo-radio-norm-" + Guid.NewGuid().ToString("N") + ".mp3");
+        try
+        {
+            await File.WriteAllBytesAsync(encoded, output.ToArray());
+            await using var reencoded = new MemoryStream();
+            await using var check = File.OpenRead(encoded);
+            var again = await transcoder.TranscodeToMp3Async(check, reencoded, 192, null, CancellationToken.None);
+            Assert.NotNull(again);
+            Assert.InRange(again!.IntegratedLufs, -17.5, -14.5);
+            Assert.Equal(0, again.GainDb);
+        }
+        finally { try { File.Delete(encoded); } catch { } }
+    }
+
+    [Fact]
+    public void Flow_PrefersTheClosestMeasuredTrackAndFallsBackToSnapshotOrder()
+    {
+        var current = new RadioAudioProfile(-16, 6, -1, 0, 2000, 0.10, 6000);
+        var bright = new RadioAudioProfile(-16, 6, -1, 0, 6500, 0.12, 12000);
+        var close = new RadioAudioProfile(-16, 7, -1, 0, 2200, 0.11, 6500);
+        var noisy = new RadioAudioProfile(-16, 4, -1, 0, 2100, 0.60, 7000);
+
+        Assert.Equal(1, LastFmRadioStreamService.ChooseByFlow(current, [bright, close, noisy]));
+        Assert.Equal(2, LastFmRadioStreamService.ChooseByFlow(current, [null, null, close]));
+        Assert.Equal(0, LastFmRadioStreamService.ChooseByFlow(current, [null, null, null]));
+        Assert.Equal(0, LastFmRadioStreamService.ChooseByFlow(null, [bright, close]));
+        Assert.True(LastFmRadioStreamService.FlowDistance(current, close)
+            < LastFmRadioStreamService.FlowDistance(current, bright));
+    }
+
+    private static MemoryStream WavSilence() => WavTone(seconds: 0.25, amplitude: 0, frequencyHz: 440);
+
+    private static MemoryStream WavTone(double seconds, double amplitude, double frequencyHz)
     {
         const int sampleRate = 44100;
-        const int samples = sampleRate / 4;
+        var samples = (int)(sampleRate * seconds);
         const short channels = 1;
         const short bitsPerSample = 16;
         var dataLength = samples * channels * (bitsPerSample / 8);
@@ -235,7 +293,10 @@ public class LastFmRadioCoreTests
             writer.Write("fmt "u8); writer.Write(16); writer.Write((short)1); writer.Write(channels);
             writer.Write(sampleRate); writer.Write(sampleRate * channels * bitsPerSample / 8);
             writer.Write((short)(channels * bitsPerSample / 8)); writer.Write(bitsPerSample);
-            writer.Write("data"u8); writer.Write(dataLength); writer.Write(new byte[dataLength]);
+            writer.Write("data"u8); writer.Write(dataLength);
+            for (var index = 0; index < samples; index++)
+                writer.Write((short)(amplitude * short.MaxValue
+                    * Math.Sin(2 * Math.PI * frequencyHz * index / sampleRate)));
         }
         stream.Position = 0;
         return stream;
@@ -757,6 +818,102 @@ public class LastFmRadioRecommendationTests
             Assert.All(refreshed.Tracks, track => Assert.InRange(Rank(track), 5, 9));
         }
         finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task RadioCompletions_CountLessThanChosenPlaysForLearningAndSeeding()
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-prov-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var settings = TestOptions.Monitor(new LastFmSettings
+                { ApiKey = "key", MinimumPlays = 5, RadioTrackCount = 10, EnableDiscoveryStations = false });
+            var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
+                new ExternalIdRegistry(), new Mock<ILogger<LastFmRadioStateStore>>().Object);
+            var service = RecommendationService(settings, state, new RecommendationHandler());
+            service.Randomizer = () => new Random(5);
+
+            // Twelve tracks the radio played to the end weigh 4.8 against a threshold of
+            // five: not enough to call the profile learned on the radio's own output.
+            for (var index = 0; index < 12; index++) state.RecordPlay("alice", new LastFmRadioPlay
+            {
+                Artist = "Radio Artist " + index, Title = "Served " + index, Source = "internet-radio",
+                PlayedAtUtc = DateTime.UtcNow.AddMinutes(-index)
+            });
+            Assert.Contains(await service.BuildAsync("alice"),
+                station => station.Kind == LastFmRadioStationKind.Starter);
+
+            // One play the listener chose tips it, and although it is the oldest play it
+            // is the strongest seed, so the mix is seeded from it first.
+            state.RecordPlay("alice", new LastFmRadioPlay
+            {
+                Artist = "Chosen Artist", Title = "Chosen Track", Source = "scrobble",
+                PlayedAtUtc = DateTime.UtcNow.AddHours(-2)
+            });
+            var mix = Assert.Single(await service.BuildAsync("alice"),
+                station => station.Kind == LastFmRadioStationKind.YourMix);
+            Assert.Equal("Chosen Artist", mix.Seeds[0]);
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task Mix_SpreadsAcrossSeedsInsteadOfLettingTheFirstSeedFillIt()
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-src-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var settings = TestOptions.Monitor(new LastFmSettings
+            {
+                ApiKey = "key", MinimumPlays = 3, RadioTrackCount = 12, DiscoveryPercent = 100,
+                EnableDiscoveryStations = false
+            });
+            var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
+                new ExternalIdRegistry(), new Mock<ILogger<LastFmRadioStateStore>>().Object);
+            for (var index = 0; index < 6; index++) state.RecordPlay("alice", new LastFmRadioPlay
+            {
+                Artist = "Seed Artist " + index, Title = "Seed " + index,
+                PlayedAtUtc = DateTime.UtcNow.AddHours(-index)
+            });
+            var service = RecommendationService(settings, state, new SeedSpecificHandler());
+            service.Randomizer = () => new FlatRandom();
+
+            // Every seed answers fifteen neighbours at the same match scores, and the
+            // newest seed carries the most affinity. Without a share per source the flat
+            // draw would take the newest seed's list and most of the second's; with it,
+            // no seed holds more than a share and a half (three of twelve).
+            var mix = Assert.Single(await service.BuildAsync("alice"),
+                station => station.Kind == LastFmRadioStationKind.YourMix);
+            Assert.Equal(12, mix.Tracks.Count);
+            var perSeed = mix.Tracks.GroupBy(track => track.Title.Split(" sim ")[0])
+                .ToDictionary(group => group.Key, group => group.Count());
+            Assert.All(perSeed.Values, count => Assert.InRange(count, 1, 3));
+            Assert.True(perSeed.Count >= 4, $"only {perSeed.Count} seeds represented");
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    /// <summary>Last.fm fake whose similar tracks are specific to the seed asked about.</summary>
+    private sealed class SeedSpecificHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query);
+            var seed = query["track"] ?? "seed";
+            object body = query["method"] switch
+            {
+                "track.getsimilar" => new { similartracks = new { track = Enumerable.Range(0, 15)
+                    .Select(index => new { name = $"{seed} sim {index}", match = 1d - index / 100d,
+                        duration = 180000, artist = new { name = $"{seed} Neighbour {index}" } }).ToArray() }},
+                "artist.gettoptags" => new { toptags = new { tag = Array.Empty<object>() } },
+                _ => new { }
+            };
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            { Content = new StringContent(JsonSerializer.Serialize(body)) });
+        }
     }
 
     [Fact]

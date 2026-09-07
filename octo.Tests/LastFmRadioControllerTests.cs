@@ -707,10 +707,12 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
         public TaskCompletionSource? CompletionGate { get; set; }
         private int _calls;
         public void ResetStarted() => Started = NewSignal();
-        public async Task TranscodeToMp3Async(Stream input, Stream output, int bitrateKbps,
-            CancellationToken cancellationToken)
+        public double? LastTargetLufs { get; private set; }
+        public async Task<RadioAudioProfile?> TranscodeToMp3Async(Stream input, Stream output, int bitrateKbps,
+            double? targetLufs, CancellationToken cancellationToken)
         {
             LastBitrateKbps = bitrateKbps;
+            LastTargetLufs = targetLufs;
             var call = Interlocked.Increment(ref _calls);
             Started.TrySetResult();
             if (BeforeWriteGate is not null)
@@ -720,8 +722,9 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
             await output.FlushAsync(cancellationToken);
             if (CompletionGate is not null)
                 await CompletionGate.Task.WaitAsync(cancellationToken);
-            if (call <= FailuresBeforeSuccess + CompleteCalls) return;
+            if (call <= FailuresBeforeSuccess + CompleteCalls) return null;
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return null;
         }
 
         private static TaskCompletionSource NewSignal() =>

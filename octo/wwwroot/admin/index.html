@@ -523,6 +523,13 @@
             </div>
             <div class="set-row stack">
               <div class="set-info">
+                <div class="set-info-t">Radio loudness target (LUFS)</div>
+                <div class="set-info-d">Every radio track is brought to this EBU R128 loudness before it joins the stream, so local files and previews play at one level. -16 suits headphones and speakers; -14 is what most streaming services use. 0 turns it off.</div>
+              </div>
+              <input class="set-input" name="LastFm.RadioLoudnessTargetLufs" type="number" min="-23" max="0" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
                 <div class="set-info-t">Refresh stations every (hours)</div>
                 <div class="set-info-d">Rebuilds dynamic and pinned station queues in the background. The current snapshot stays playable until its replacement is ready. Default: 12 hours.</div>
               </div>

@@ -39,8 +39,28 @@ public sealed class LastFmRadioRecommendationService
     internal const double SeedRecencyDecay = 0.85;
     internal const double HeartedSeedAffinity = 1.5;
 
-    /// <summary>A candidate with its final draw weight: match x rank decay x seed affinity.</summary>
-    internal sealed record Candidate(LastFmService.SimilarTrack Track, double Weight);
+    /// <summary>A candidate with its final draw weight (match x rank decay x seed affinity)
+    /// and the list it came from: a seed track, a tag, an artist, or the listener's history.</summary>
+    internal sealed record Candidate(LastFmService.SimilarTrack Track, double Weight, string Source);
+
+    internal const string FamiliarSource = "history";
+
+    /// <summary>
+    /// How much a play counts as a listening signal, by where it came from. A track the
+    /// listener chose and scrobbled is the real signal. A track the radio played to the
+    /// end says less: they did not pick it, they only did not switch it off. Left at full
+    /// weight, a station slowly trains itself on its own output. A play recorded at
+    /// bootstrap from a random library track says less still.
+    /// </summary>
+    internal const double RadioPlayWeight = 0.4;
+    internal const double RandomBootstrapWeight = 0.5;
+
+    internal static double SourceWeight(LastFmRadioPlay play) => play.Source switch
+    {
+        "internet-radio" => RadioPlayWeight,
+        "bootstrap-random" => RandomBootstrapWeight,
+        _ => 1d,
+    };
 
     private static readonly HashSet<string> DeniedTags = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -89,7 +109,10 @@ public sealed class LastFmRadioRecommendationService
         var candidateTarget = Math.Min(100,
             settings.EffectiveRadioTrackCount + refillHeadroom + 10);
         var artistScores = ScoreArtists(plays);
-        var trackSeeds = plays.GroupBy(play => LastFmRadioSeedNormalizer.TrackKey(play.Artist, play.Title))
+        // Seeds are the strongest recent signals, not simply the newest plays: a heart
+        // outranks a play, a chosen play outranks one the radio served, and age decays.
+        var trackSeeds = plays.OrderByDescending(SeedScore)
+            .GroupBy(play => LastFmRadioSeedNormalizer.TrackKey(play.Artist, play.Title))
             .Select(group => group.First()).Take(8).ToList();
         var tags = ScoreLocalTags(plays);
 
@@ -109,23 +132,24 @@ public sealed class LastFmRadioRecommendationService
         var stations = new List<LastFmRadioStation>();
         if (settings.EnablePersonalizedStations)
         {
-            var learned = plays.Count(play => play.LearnedSignal) >= settings.EffectiveMinimumPlays;
+            var learned = plays.Where(play => play.LearnedSignal).Sum(SourceWeight)
+                >= settings.EffectiveMinimumPlays;
             var mixKey = learned ? "your-mix" : "starter";
             var mixCandidates = await TracksFromSeeds(trackSeeds.Take(6), 12, ct);
             var familiar = plays.Select(ToCandidate).ToList();
+            // The familiar share of the mix is a quota the walk enforces, so both halves
+            // are drawn over their whole pools rather than the top of each list.
+            int? familiarQuota = mixCandidates.Count == 0
+                ? null
+                : settings.EffectiveRadioTrackCount
+                    - (int)Math.Round(settings.EffectiveRadioTrackCount * settings.EffectiveDiscoveryPercent / 100d);
             if (mixCandidates.Count == 0) mixCandidates.AddRange(familiar);
-            // The familiar half is a draw over the whole history, recent and hearted
-            // plays weighing more, not the newest plays every time.
-            var blendedMix = Blend(WeightedOrder(familiar, random, Previous(mixKey)),
-                mixCandidates, settings.EffectiveDiscoveryPercent,
-                Math.Min(settings.EffectiveRadioTrackCount * 2,
-                    settings.EffectiveRadioTrackCount + refillHeadroom));
             stations.Add(Create(username, mixKey,
                 learned ? "Your Mix" : "Starter Radio",
                 learned ? LastFmRadioStationKind.YourMix : LastFmRadioStationKind.Starter,
                 true, trackSeeds.Select(seed => seed.Artist),
-                Shape(blendedMix, plays, settings, unavailable, random, Previous(mixKey),
-                    ArtistCap(settings, LastFmRadioStationKind.YourMix))));
+                Shape(familiar.Concat(mixCandidates), plays, settings, unavailable, random, Previous(mixKey),
+                    ArtistCap(settings, LastFmRadioStationKind.YourMix), familiarQuota: familiarQuota)));
 
             if (learned)
             {
@@ -205,10 +229,11 @@ public sealed class LastFmRadioRecommendationService
         foreach (var seed in seeds)
         {
             var affinity = Math.Pow(SeedRecencyDecay, position++) * (seed.Hearted ? HeartedSeedAffinity : 1d);
+            var source = LastFmRadioSeedNormalizer.TrackKey(seed.Artist, seed.Title);
             try
             {
                 result.AddRange(Ranked(
-                    await _lastFm.GetSimilarTracksAsync(seed.Artist, seed.Title, each, ct), affinity));
+                    await _lastFm.GetSimilarTracksAsync(seed.Artist, seed.Title, each, ct), source, affinity));
             }
             catch (OperationCanceledException) { break; }
         }
@@ -221,7 +246,7 @@ public sealed class LastFmRadioRecommendationService
         var result = new List<Candidate>();
         foreach (var tag in tags.Take(5))
         {
-            try { result.AddRange(Ranked(await _lastFm.GetTagTopTracksAsync(tag, each, ct))); }
+            try { result.AddRange(Ranked(await _lastFm.GetTagTopTracksAsync(tag, each, ct), "tag:" + tag)); }
             catch (OperationCanceledException) { break; }
         }
         return result;
@@ -233,10 +258,11 @@ public sealed class LastFmRadioRecommendationService
         int candidateTarget, CancellationToken ct)
     {
         var result = Ranked(await _lastFm.GetArtistTopTracksAsync(artist,
-            Math.Min(50, candidateTarget), ct));
+            Math.Min(50, candidateTarget), ct), "artist:" + artist);
         foreach (var similar in (await _lastFm.GetSimilarArtistsAsync(artist, 6, ct)).Take(5))
             result.AddRange(Ranked(await _lastFm.GetArtistTopTracksAsync(similar.Name,
-                Math.Min(20, Math.Max(6, candidateTarget / 5)), ct), NeighbourArtistAffinity));
+                Math.Min(20, Math.Max(6, candidateTarget / 5)), ct), "artist:" + similar.Name,
+                NeighbourArtistAffinity));
         return result;
     }
 
@@ -244,24 +270,32 @@ public sealed class LastFmRadioRecommendationService
     /// Selects the station's tracks from its weighted candidates. One weighted draw
     /// orders the pool (see <see cref="WeightedOrder"/>), then the walk applies the
     /// spacing rules: nothing unavailable, nothing just played when asked, never the
-    /// same artist twice in a row, and no artist past its cap for this station kind.
-    /// That last rule is the marginal-relevance idea, the redundancy penalty being
-    /// artist repetition, applied greedily.
+    /// same artist twice in a row, no artist past its cap for this station kind, no
+    /// source list (one seed's neighbours, one tag, one artist) past its share, and
+    /// when a familiar quota is set, that many tracks from the listener's own history
+    /// and the rest from discovery. The caps are the marginal-relevance idea applied
+    /// greedily, with artist and source repetition as the redundancy.
     /// </summary>
     private static List<LastFmRadioTrack> Shape(IEnumerable<Candidate> candidates,
         IReadOnlyCollection<LastFmRadioPlay> plays, LastFmSettings settings,
         IReadOnlySet<string> unavailable, Random random, IReadOnlySet<string> previous,
-        int artistCap, bool excludeRecent = false)
+        int artistCap, bool excludeRecent = false, int? familiarQuota = null)
     {
+        var target = settings.EffectiveRadioTrackCount;
         var recent = plays.Take(30).Select(play => LastFmRadioSeedNormalizer.TrackKey(play.Artist, play.Title))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var lastArtist = "";
         var perArtist = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var perSource = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var familiarTaken = 0;
         var output = new List<LastFmRadioTrack>();
         var distinct = candidates
             .Where(item => item.Track.Artist.Length > 0 && item.Track.Title.Length > 0)
             .GroupBy(item => LastFmRadioSeedNormalizer.TrackKey(item.Track.Artist, item.Track.Title))
-            .Select(group => group.OrderByDescending(item => item.Weight).First());
+            .Select(group => group.OrderByDescending(item => item.Weight).First())
+            .ToList();
+        var sourceCap = SourceCap(target, distinct.Select(item => item.Source)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Count());
         foreach (var candidate in WeightedOrder(distinct, random, previous))
         {
             var track = candidate.Track;
@@ -270,6 +304,13 @@ public sealed class LastFmRadioRecommendationService
             if (excludeRecent && recent.Contains(key)) continue;
             if (string.Equals(lastArtist, track.Artist, StringComparison.OrdinalIgnoreCase)) continue;
             if (perArtist.GetValueOrDefault(track.Artist) >= artistCap) continue;
+            if (perSource.GetValueOrDefault(candidate.Source) >= sourceCap) continue;
+            var isFamiliar = candidate.Source == FamiliarSource;
+            if (familiarQuota is { } quota)
+            {
+                if (isFamiliar && familiarTaken >= quota) continue;
+                if (!isFamiliar && output.Count - familiarTaken >= target - quota) continue;
+            }
             output.Add(new LastFmRadioTrack
             {
                 Artist = LastFmRadioSeedNormalizer.Artist(track.Artist) ?? track.Artist,
@@ -278,10 +319,25 @@ public sealed class LastFmRadioRecommendationService
             });
             lastArtist = track.Artist;
             perArtist[track.Artist] = perArtist.GetValueOrDefault(track.Artist) + 1;
-            if (output.Count >= settings.EffectiveRadioTrackCount) break;
+            perSource[candidate.Source] = perSource.GetValueOrDefault(candidate.Source) + 1;
+            if (isFamiliar) familiarTaken++;
+            if (output.Count >= target) break;
         }
         return output;
     }
+
+    /// <summary>
+    /// How many tracks one source list may hold: an even share and a half, never fewer
+    /// than three. Six seeds feeding a 50-track mix each get at most 13; a station built
+    /// from one tag is unconstrained by it.
+    /// </summary>
+    internal static int SourceCap(int target, int sources) =>
+        Math.Max(3, (int)Math.Ceiling(1.5 * target / Math.Max(1, sources)));
+
+    /// <summary>The seed ranking: provenance, hearts, and a 45-day recency decay.</summary>
+    private static double SeedScore(LastFmRadioPlay play) =>
+        SourceWeight(play) * (play.Hearted ? 2 : 1)
+        * Math.Exp(-(DateTime.UtcNow - play.PlayedAtUtc).TotalDays / 45);
 
     /// <summary>
     /// How many tracks one artist may hold in a station. An artist station is about its
@@ -292,20 +348,22 @@ public sealed class LastFmRadioRecommendationService
             ? Math.Max(3, settings.EffectiveRadioTrackCount / 4)
             : Math.Max(2, settings.EffectiveRadioTrackCount / 10);
 
-    /// <summary>A play as a candidate: hearted counts double, and its place in the
-    /// recency order decays the same way a provider rank does.</summary>
+    /// <summary>A play as a candidate: hearted counts double, provenance scales it, and its
+    /// place in the recency order decays the same way a provider rank does.</summary>
     private static Candidate ToCandidate(LastFmRadioPlay play, int recencyRank) =>
         Weigh(new LastFmService.SimilarTrack(play.Artist, play.Title, play.Hearted ? 2 : 1, play.Duration),
-            recencyRank);
+            recencyRank, FamiliarSource, SourceWeight(play));
 
     private static double RankDecay(int rank) => 1d / (1d + rank / RankHalfDepth);
 
-    private static Candidate Weigh(LastFmService.SimilarTrack track, int rank, double affinity = 1d) =>
-        new(track, Math.Max(0.05, track.Match) * RankDecay(rank) * affinity);
+    private static Candidate Weigh(LastFmService.SimilarTrack track, int rank, string source,
+        double affinity = 1d) =>
+        new(track, Math.Max(0.05, track.Match) * RankDecay(rank) * affinity, source);
 
     /// <summary>Weights a provider's list in the order it came, which is the provider's ranking.</summary>
-    private static List<Candidate> Ranked(IEnumerable<LastFmService.SimilarTrack> tracks, double affinity = 1d) =>
-        tracks.Select((track, rank) => Weigh(track, rank, affinity)).ToList();
+    private static List<Candidate> Ranked(IEnumerable<LastFmService.SimilarTrack> tracks, string source,
+        double affinity = 1d) =>
+        tracks.Select((track, rank) => Weigh(track, rank, source, affinity)).ToList();
 
     /// <summary>
     /// One weighted draw over the candidates (Efraimidis-Spirakis: each candidate draws
@@ -331,16 +389,6 @@ public sealed class LastFmRadioRecommendationService
             : weight;
     }
 
-    /// <summary>Fixed share of familiar and discovery rows, each side already in draw order.</summary>
-    private static IEnumerable<Candidate> Blend(
-        IEnumerable<Candidate> familiar,
-        IEnumerable<Candidate> discovery, int discoveryPercent, int count)
-    {
-        var familiarCount = count - (int)Math.Round(count * discoveryPercent / 100d);
-        return familiar.Take(Math.Max(0, familiarCount))
-            .Concat(discovery.Take(Math.Max(0, count - familiarCount)));
-    }
-
     private static void SuppressStationOverlap(IReadOnlyList<LastFmRadioStation> stations)
     {
         var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -359,8 +407,7 @@ public sealed class LastFmRadioRecommendationService
         var scores = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
         foreach (var group in plays.GroupBy(play => LastFmRadioSeedNormalizer.Artist(play.Artist) ?? play.Artist,
                      StringComparer.OrdinalIgnoreCase))
-            scores[group.Key] = group.Take(3).Sum(play => Math.Exp(-(DateTime.UtcNow - play.PlayedAtUtc).TotalDays / 45)
-                * (play.Hearted ? 2 : 1));
+            scores[group.Key] = group.Take(3).Sum(SeedScore);
         return scores.OrderByDescending(pair => pair.Value).ThenBy(pair => pair.Key)
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
     }
@@ -368,7 +415,8 @@ public sealed class LastFmRadioRecommendationService
     private static Dictionary<string, double> ScoreLocalTags(IEnumerable<LastFmRadioPlay> plays)
     {
         var tags = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-        foreach (var play in plays.Where(play => !string.IsNullOrWhiteSpace(play.Genre))) AddTag(tags, play.Genre!, 2);
+        foreach (var play in plays.Where(play => !string.IsNullOrWhiteSpace(play.Genre)))
+            AddTag(tags, play.Genre!, 2 * SourceWeight(play));
         return tags;
     }
 

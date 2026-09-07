@@ -48,6 +48,14 @@ public class LastFmSettings
     /// </summary>
     public int StarterPublishTimeoutSeconds { get; set; } = 8;
 
+    /// <summary>
+    /// EBU R128 integrated loudness every radio track is brought to before it joins the
+    /// stream, in LUFS. Tracks arrive from local FLAC and from YouTube previews at
+    /// levels many LU apart; a static gain per track (with a true-peak limiter at
+    /// -1 dBTP) makes the station one level. 0 disables normalisation.
+    /// </summary>
+    public int RadioLoudnessTargetLufs { get; set; } = -16;
+
     public int HistoryRetentionDays { get; set; } = 90;
     public int DiscoveryPercent { get; set; } = 35;
     public int RefreshIntervalHours { get; set; } = 12;
@@ -60,6 +68,9 @@ public class LastFmSettings
     public int EffectiveDiscoveryPercent => Math.Clamp(DiscoveryPercent, 0, 100);
     public int EffectiveRefreshIntervalHours => Math.Clamp(RefreshIntervalHours, 1, 168);
     public int EffectiveMinimumPlays => Math.Clamp(MinimumPlays, 3, 100);
+    public double? EffectiveRadioLoudnessTarget => RadioLoudnessTargetLufs == 0
+        ? null
+        : Math.Clamp(RadioLoudnessTargetLufs, -23, -9);
     public TimeSpan? EffectiveStarterPublishTimeout => StarterPublishTimeoutSeconds <= 0
         ? null
         : TimeSpan.FromSeconds(Math.Clamp(StarterPublishTimeoutSeconds, 1, 300));
