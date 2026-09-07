@@ -603,7 +603,12 @@ public class LastFmRadioRecommendationTests
                 Options.Create(new MetadataSettings { Language = "en" }),
                 new Mock<ILogger<LastFmService>>().Object);
             var service = new LastFmRadioRecommendationService(lastFm, state, settings,
-                new Mock<ILogger<LastFmRadioRecommendationService>>().Object);
+                new Mock<ILogger<LastFmRadioRecommendationService>>().Object)
+            {
+                // Same seed for both builds: the draw is what varies a refresh, and with
+                // it pinned the rest of the pipeline has to be deterministic.
+                Randomizer = () => new Random(1234),
+            };
             var first = await service.BuildAsync("alice");
             var second = await service.BuildAsync("alice");
             Assert.Contains(first, station => station.Kind == LastFmRadioStationKind.Starter);
@@ -671,6 +676,45 @@ public class LastFmRadioRecommendationTests
                 Assert.DoesNotContain(station.Tracks.Zip(station.Tracks.Skip(1)), pair =>
                     pair.First.Artist.Equals(pair.Second.Artist, StringComparison.OrdinalIgnoreCase));
             }
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task Refresh_DrawsADifferentSnapshotAndRotatesAwayFromThePreviousOne()
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-rot-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var settings = TestOptions.Monitor(new LastFmSettings
+            {
+                ApiKey = "key", RadioTrackCount = 10,
+                EnablePersonalizedStations = false,
+                DiscoveryStations = [new() { Id = "fusion", Name = "Fusion", Tags = ["rock", "idm"] }]
+            });
+            var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
+                new ExternalIdRegistry(), new Mock<ILogger<LastFmRadioStateStore>>().Object);
+            var service = RecommendationService(settings, state, new RecommendationHandler());
+            static IEnumerable<string> Keys(LastFmRadioStation station) => station.Tracks
+                .Select(track => LastFmRadioSeedNormalizer.TrackKey(track.Artist, track.Title));
+
+            // Two fresh builds from different draws over the same 40 candidates.
+            service.Randomizer = () => new Random(1);
+            var first = Assert.Single(await service.BuildAsync("alice"));
+            service.Randomizer = () => new Random(2);
+            var alternative = Assert.Single(await service.BuildAsync("alice"));
+            Assert.Equal(settings.CurrentValue.EffectiveRadioTrackCount, first.Tracks.Count);
+            Assert.NotEqual(Keys(first), Keys(alternative));
+
+            // Once the first snapshot is installed, a refresh mostly leaves it behind:
+            // ten of forty candidates carry a third of their weight, so the expected
+            // carry-over is about one track.
+            state.ReplaceStations("alice", [first]);
+            service.Randomizer = () => new Random(3);
+            var refreshed = Assert.Single(await service.BuildAsync("alice"));
+            var carriedOver = Keys(refreshed).Intersect(Keys(first), StringComparer.OrdinalIgnoreCase).Count();
+            Assert.InRange(carriedOver, 0, 4);
         }
         finally { try { Directory.Delete(directory, true); } catch { } }
     }

@@ -281,6 +281,28 @@ public sealed class LastFmRadioControllerTests
     }
 
     [Fact]
+    public async Task TuneIn_StartsWhereTheSelectorSaysAndWrapsThroughTheCachedTracks()
+    {
+        await using var fixture = new RadioWebFactory();
+        fixture.InstallStation();
+        await fixture.Warmup.ProcessAsync("alice");
+        fixture.TuneIn.Next = 1;
+        using var client = fixture.CreateClient();
+
+        var listBody = await StationListAsync(client,
+            "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json");
+        using var list = JsonDocument.Parse(listBody);
+        var url = list.RootElement.GetProperty("subsonic-response")
+            .GetProperty("internetRadioStations").GetProperty("internetRadioStation")
+            .EnumerateArray().Single(item => item.GetProperty("name").GetString() == "Your Mix")
+            .GetProperty("streamUrl").GetString()!;
+        var token = new Uri(url).Segments[^1];
+
+        var pool = fixture.Sessions.Get(token)!.ReadyPool!.Select(item => item.Track.Title).ToList();
+        Assert.Equal(["Song Two", "Song Three", "Song One"], pool);
+    }
+
+    [Fact]
     public async Task InternetRadioList_ReturnsReadyStationsWithoutWaitingForCacheMisses()
     {
         await using var fixture = new RadioWebFactory();
@@ -534,12 +556,20 @@ public sealed class LastFmRadioNativeApiTests
     }
 }
 
+/// <summary>Tune-in start the tests can pin. 0 keeps snapshot order, the pre-rotation behaviour.</summary>
+internal sealed class FixedTuneInSelector : IRadioTuneInSelector
+{
+    public int Next { get; set; }
+    public int Start(int candidateCount) => candidateCount <= 0 ? 0 : Next % candidateCount;
+}
+
 internal sealed class RadioWebFactory : WebApplicationFactory<Program>
 {
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "octo-radio-web-" + Guid.NewGuid());
     public RadioUpstreamHandler Handler { get; } = new();
     public Mock<IMusicMetadataService> Metadata { get; } = new();
     public BlockingRadioTranscoder Transcoder { get; } = new();
+    public FixedTuneInSelector TuneIn { get; } = new();
     public LastFmRadioStateStore State => Services.GetRequiredService<LastFmRadioStateStore>();
     public LastFmRadioRefreshQueue RefreshQueue =>
         Services.GetRequiredService<LastFmRadioRefreshQueue>();
@@ -638,6 +668,8 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
             services.RemoveAll<IHostedService>();
             services.RemoveAll<IHttpClientFactory>();
             services.AddSingleton<IHttpClientFactory>(new RadioHttpClientFactory(Handler));
+            services.RemoveAll<IRadioTuneInSelector>();
+            services.AddSingleton<IRadioTuneInSelector>(TuneIn);
             services.RemoveAll<IMusicMetadataService>();
             services.AddSingleton(Metadata.Object);
             services.RemoveAll<ILastFmRadioAudioTranscoder>();

@@ -6,9 +6,24 @@ using Octo.Models.Settings;
 
 namespace Octo.Services.LastFm;
 
-/// <summary>Builds deterministic canonical station snapshots from bounded listening signals.</summary>
+/// <summary>
+/// Builds canonical station snapshots from bounded listening signals. Which candidates
+/// make the cut is a weighted draw rather than a fixed top-N, so two refreshes of the
+/// same profile give two different stations; the previous snapshot is demoted so a
+/// refresh rotates the station instead of restating it.
+/// </summary>
 public sealed class LastFmRadioRecommendationService
 {
+    /// <summary>
+    /// Share of its weight a track keeps when it was already in this station's
+    /// previous snapshot. Low enough that a refresh is mostly new, high enough that a
+    /// strong match can still come back.
+    /// </summary>
+    internal const double PreviousSnapshotWeight = 0.35;
+
+    /// <summary>Source of the draw. Tests replace it with a seeded one so a build repeats exactly.</summary>
+    internal Func<Random> Randomizer { get; set; } = () => new Random();
+
     private static readonly HashSet<string> DeniedTags = new(StringComparer.OrdinalIgnoreCase)
     {
         "seen live", "favorites", "favourites", "owned", "spotify", "albums i own",
@@ -41,6 +56,13 @@ public sealed class LastFmRadioRecommendationService
         var settings = _settings.CurrentValue;
         if (!settings.EnableRadio) return [];
         var user = _state.GetUser(username);
+        var random = Randomizer();
+        var previousSnapshots = user.Stations.GroupBy(station => station.Key, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => (IReadOnlySet<string>)group.First().Tracks
+                .Select(track => LastFmRadioSeedNormalizer.TrackKey(track.Artist, track.Title))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
+        IReadOnlySet<string> Previous(string stationKey) =>
+            previousSnapshots.GetValueOrDefault(stationKey) ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var plays = user.Plays.OrderByDescending(play => play.PlayedAtUtc).ToList();
         var unavailable = user.UnavailableTracks
             .Where(track => track.RetryAfterUtc > DateTime.UtcNow)
@@ -70,17 +92,20 @@ public sealed class LastFmRadioRecommendationService
         if (settings.EnablePersonalizedStations)
         {
             var learned = plays.Count(play => play.LearnedSignal) >= settings.EffectiveMinimumPlays;
+            var mixKey = learned ? "your-mix" : "starter";
             var mixCandidates = await TracksFromSeeds(trackSeeds.Take(6), 12, ct);
             if (mixCandidates.Count == 0) mixCandidates.AddRange(plays.Select(ToCandidate));
-            var blendedMix = Blend(plays.Select(ToCandidate), mixCandidates,
-                settings.EffectiveDiscoveryPercent,
+            // The familiar half is a draw over the whole history (hearts weigh double),
+            // not the newest plays every time.
+            var blendedMix = Blend(WeightedOrder(plays.Select(ToCandidate), random, Previous(mixKey)),
+                mixCandidates, settings.EffectiveDiscoveryPercent,
                 Math.Min(settings.EffectiveRadioTrackCount * 2,
                     settings.EffectiveRadioTrackCount + refillHeadroom));
-            stations.Add(Create(username, learned ? "your-mix" : "starter",
+            stations.Add(Create(username, mixKey,
                 learned ? "Your Mix" : "Starter Radio",
                 learned ? LastFmRadioStationKind.YourMix : LastFmRadioStationKind.Starter,
                 true, trackSeeds.Select(seed => seed.Artist),
-                Shape(blendedMix, plays, settings, unavailable)));
+                Shape(blendedMix, plays, settings, unavailable, random, Previous(mixKey))));
 
             if (learned)
             {
@@ -92,25 +117,28 @@ public sealed class LastFmRadioRecommendationService
                     if (discovery.Count >= 5)
                         stations.Add(Create(username, "discovery", "Discovery Mix",
                             LastFmRadioStationKind.Discovery, true, topTags,
-                            Shape(discovery, plays, settings, unavailable, excludeRecent: true)));
+                            Shape(discovery, plays, settings, unavailable, random, Previous("discovery"),
+                                excludeRecent: true)));
                 }
 
                 foreach (var artist in artistScores.Take(2).Select(pair => pair.Key))
                 {
                     var candidates = await TracksFromArtist(artist, candidateTarget, ct);
+                    var stationKey = "artist-" + Key(artist);
                     if (candidates.Count >= 5)
-                        stations.Add(Create(username, "artist-" + Key(artist), $"{artist} Radio",
+                        stations.Add(Create(username, stationKey, $"{artist} Radio",
                             LastFmRadioStationKind.Artist, true, [artist],
-                            Shape(candidates, plays, settings, unavailable)));
+                            Shape(candidates, plays, settings, unavailable, random, Previous(stationKey))));
                 }
 
                 foreach (var tag in tags.OrderByDescending(pair => pair.Value).Select(pair => pair.Key).Take(3))
                 {
                     var candidates = await TracksFromTags([tag], candidateTarget, ct);
+                    var stationKey = "genre-" + Key(tag);
                     if (candidates.Select(item => item.Artist).Distinct(StringComparer.OrdinalIgnoreCase).Count() >= 4)
-                        stations.Add(Create(username, "genre-" + Key(tag), Title(tag) + " Radio",
+                        stations.Add(Create(username, stationKey, Title(tag) + " Radio",
                             LastFmRadioStationKind.Genre, true, [tag],
-                            Shape(candidates, plays, settings, unavailable)));
+                            Shape(candidates, plays, settings, unavailable, random, Previous(stationKey))));
                 }
             }
         }
@@ -124,10 +152,11 @@ public sealed class LastFmRadioRecommendationService
                     candidates.AddRange(plays.Where(play => definition.Tags.Any(tag =>
                             (play.Genre ?? "").Contains(tag, StringComparison.OrdinalIgnoreCase)))
                         .Select(ToCandidate));
+                var stationKey = "pinned-" + definition.Id;
                 if (candidates.Count > 0)
-                    stations.Add(Create(username, "pinned-" + definition.Id, definition.Name,
+                    stations.Add(Create(username, stationKey, definition.Name,
                         LastFmRadioStationKind.Pinned, false, definition.Tags,
-                        Shape(candidates, plays, settings, unavailable),
+                        Shape(candidates, plays, settings, unavailable, random, Previous(stationKey)),
                         DefinitionVersion(definition)));
             }
         }
@@ -176,18 +205,18 @@ public sealed class LastFmRadioRecommendationService
 
     private static List<LastFmRadioTrack> Shape(IEnumerable<LastFmService.SimilarTrack> candidates,
         IReadOnlyCollection<LastFmRadioPlay> plays, LastFmSettings settings,
-        IReadOnlySet<string> unavailable, bool excludeRecent = false)
+        IReadOnlySet<string> unavailable, Random random, IReadOnlySet<string> previous,
+        bool excludeRecent = false)
     {
         var recent = plays.Take(30).Select(play => LastFmRadioSeedNormalizer.TrackKey(play.Artist, play.Title))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var lastArtist = "";
         var output = new List<LastFmRadioTrack>();
-        foreach (var candidate in candidates
-                     .Where(item => item.Artist.Length > 0 && item.Title.Length > 0)
-                     .GroupBy(item => LastFmRadioSeedNormalizer.TrackKey(item.Artist, item.Title))
-                     .Select(group => group.OrderByDescending(item => item.Match).First())
-                     .OrderByDescending(item => item.Match)
-                     .ThenBy(item => StableOrder(item.Artist, item.Title)))
+        var distinct = candidates
+            .Where(item => item.Artist.Length > 0 && item.Title.Length > 0)
+            .GroupBy(item => LastFmRadioSeedNormalizer.TrackKey(item.Artist, item.Title))
+            .Select(group => group.OrderByDescending(item => item.Match).First());
+        foreach (var candidate in WeightedOrder(distinct, random, previous))
         {
             var key = LastFmRadioSeedNormalizer.TrackKey(candidate.Artist, candidate.Title);
             if (unavailable.Contains(key)) continue;
@@ -207,6 +236,29 @@ public sealed class LastFmRadioRecommendationService
 
     private static LastFmService.SimilarTrack ToCandidate(LastFmRadioPlay play) =>
         new(play.Artist, play.Title, play.Hearted ? 2 : 1, play.Duration);
+
+    /// <summary>
+    /// One weighted draw over the candidates: a track's chance of landing near the front
+    /// is proportional to its match, and the draw is different every build. Tracks that
+    /// were in this station's previous snapshot keep <see cref="PreviousSnapshotWeight"/>
+    /// of their weight. Ties fall back to the stable hash so equal draws are not
+    /// order-of-arrival.
+    /// </summary>
+    private static IEnumerable<LastFmService.SimilarTrack> WeightedOrder(
+        IEnumerable<LastFmService.SimilarTrack> candidates, Random random, IReadOnlySet<string> previous) =>
+        candidates
+            .Select(item => (Item: item, Draw: Math.Pow(random.NextDouble(), 1d / Weight(item, previous))))
+            .OrderByDescending(pair => pair.Draw)
+            .ThenBy(pair => StableOrder(pair.Item.Artist, pair.Item.Title))
+            .Select(pair => pair.Item);
+
+    private static double Weight(LastFmService.SimilarTrack item, IReadOnlySet<string> previous)
+    {
+        var weight = Math.Max(0.05, item.Match);
+        return previous.Contains(LastFmRadioSeedNormalizer.TrackKey(item.Artist, item.Title))
+            ? weight * PreviousSnapshotWeight
+            : weight;
+    }
 
     private static IEnumerable<LastFmService.SimilarTrack> Blend(
         IEnumerable<LastFmService.SimilarTrack> familiar,

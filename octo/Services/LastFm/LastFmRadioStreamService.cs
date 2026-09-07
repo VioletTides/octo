@@ -28,6 +28,7 @@ public sealed class LastFmRadioStreamService
     private readonly IMusicMetadataService _metadata;
     private readonly RadioQueueStore _queues;
     private readonly LastFmRadioRefreshQueue _refreshQueue;
+    private readonly IRadioTuneInSelector _tuneIn;
     private readonly ILogger<LastFmRadioStreamService> _logger;
     private readonly ConcurrentDictionary<string, Task> _poolWarmers = new();
 
@@ -39,13 +40,14 @@ public sealed class LastFmRadioStreamService
         LastFmRadioTrackResolver resolver,
         IMusicMetadataService metadata,
         RadioQueueStore queues, LastFmRadioRefreshQueue refreshQueue,
+        IRadioTuneInSelector tuneIn,
         ILogger<LastFmRadioStreamService> logger)
     {
         _state = state; _settings = settings; _library = library; _proxy = proxy;
         _downloads = downloads; _transcoder = transcoder; _cache = cache;
         _sessions = sessions;
         _resolver = resolver; _metadata = metadata;
-        _queues = queues; _refreshQueue = refreshQueue; _logger = logger;
+        _queues = queues; _refreshQueue = refreshQueue; _tuneIn = tuneIn; _logger = logger;
     }
 
     public LastFmRadioStation? Resolve(LastFmRadioStreamSession session)
@@ -165,12 +167,19 @@ public sealed class LastFmRadioStreamService
 
     /// <summary>Returns up to three current-snapshot tracks that already satisfy the
     /// existing radio-cache retention and size policy. This method never performs I/O
-    /// beyond checking the cache, so station listings remain responsive.</summary>
+    /// beyond checking the cache, so station listings remain responsive. The scan
+    /// starts where the tune-in selector says, so two listens open on different
+    /// cached tracks once more than three are cached; playback continues in snapshot
+    /// order from wherever the pool ends.</summary>
     public IReadOnlyList<PreparedRadioTrack> GetReadyPool(LastFmRadioStreamSession session)
     {
         var ready = new List<PreparedRadioTrack>();
-        foreach (var candidate in Candidates(session))
+        var candidates = Candidates(session);
+        if (candidates.Count == 0) return ready;
+        var start = _tuneIn.Start(candidates.Count) % candidates.Count;
+        for (var offset = 0; offset < candidates.Count; offset++)
         {
+            var candidate = candidates[(start + offset) % candidates.Count];
             var path = _cache.GetReadyPath(candidate.Key);
             if (path is null) continue;
             ready.Add(candidate.Prepared(path));

@@ -77,6 +77,7 @@ builder.Services.AddScoped<SubsonicProxyService>();
 builder.Services.AddScoped<LastFmRadioTrackResolver>();
 builder.Services.AddScoped<LastFmRadioRecommendationService>();
 builder.Services.AddScoped<LastFmRadioStreamService>();
+builder.Services.AddSingleton<IRadioTuneInSelector, RandomRadioTuneInSelector>();
 builder.Services.AddSingleton<LastFmRadioRefreshQueue>();
 builder.Services.AddSingleton<LastFmRadioStreamSessionStore>();
 builder.Services.AddSingleton<LastFmRadioTrackCache>();
