@@ -17,10 +17,13 @@ public interface ILastFmRadioAudioTranscoder
 }
 
 /// <summary>
-/// What one radio track sounds like, measured while it was transcoded. Loudness fields
-/// describe the SOURCE; <see cref="GainDb"/> is what was applied to reach the target.
-/// The spectral fields are means over the track and describe its character
-/// (brightness, noisiness, bandwidth), which survive the gain unchanged.
+/// What one radio track sounds like and what it is, gathered while it was prepared.
+/// Loudness fields describe the SOURCE; <see cref="GainDb"/> is what was applied to
+/// reach the target. The spectral fields are means over the track and describe its
+/// character (brightness, noisiness, bandwidth), which survive the gain unchanged.
+/// <see cref="Genre"/> is the catalogue genre the track resolved with and
+/// <see cref="Tags"/> its Last.fm top tags (sub-genre), so the flow picker can judge
+/// kinship alongside sound rather than by sound alone.
 /// </summary>
 public sealed record RadioAudioProfile(
     double IntegratedLufs,
@@ -29,7 +32,9 @@ public sealed record RadioAudioProfile(
     double GainDb,
     double SpectralCentroidHz,
     double SpectralFlatness,
-    double SpectralRolloffHz);
+    double SpectralRolloffHz,
+    string? Genre = null,
+    IReadOnlyList<string>? Tags = null);
 
 /// <summary>Normalizes mixed local FLAC and external M4A sources into one MP3
 /// byte stream. A fresh process per song prevents decoder state leaking across

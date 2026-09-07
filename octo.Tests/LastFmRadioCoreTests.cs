@@ -277,6 +277,28 @@ public class LastFmRadioCoreTests
             < LastFmRadioStreamService.FlowDistance(current, bright));
     }
 
+    [Fact]
+    public void Flow_WeighsKinshipBesideSound()
+    {
+        // The current track is trap. One candidate sounds almost identical but is indie
+        // rock; the other is an octave brighter but shares every tag. Kinship outweighs
+        // an octave, so the brighter trap track follows.
+        var current = new RadioAudioProfile(-16, 6, -1, 0, 2000, 0.10, 6000, "Hip-Hop", ["hip-hop", "trap"]);
+        var strangerThatSoundsClose = new RadioAudioProfile(-16, 6, -1, 0, 2100, 0.11, 6200, "Rock", ["indie rock", "rock"]);
+        var kinThatSoundsBrighter = new RadioAudioProfile(-16, 6, -1, 0, 4000, 0.10, 9000, "Hip-Hop", ["hip-hop", "trap"]);
+        Assert.Equal(1, LastFmRadioStreamService.ChooseByFlow(current, [strangerThatSoundsClose, kinThatSoundsBrighter]));
+
+        // Half the tags in common sits between the two; genre alone decides when tags
+        // are missing; nothing known is a neutral middle rather than a verdict.
+        var halfKin = current with { Tags = ["trap", "cloud rap"] };
+        Assert.InRange(LastFmRadioStreamService.Estrangement(current, halfKin), 0.5, 0.75);
+        Assert.Equal(0, LastFmRadioStreamService.Estrangement(current, current with { Tags = null }));
+        Assert.Equal(0.7, LastFmRadioStreamService.Estrangement(current with { Tags = null },
+            current with { Tags = null, Genre = "Jazz" }));
+        Assert.Equal(0.35, LastFmRadioStreamService.Estrangement(current with { Tags = null, Genre = null },
+            current with { Tags = null, Genre = null }));
+    }
+
     private static MemoryStream WavSilence() => WavTone(seconds: 0.25, amplitude: 0, frequencyHz: 440);
 
     private static MemoryStream WavTone(double seconds, double amplitude, double frequencyHz)

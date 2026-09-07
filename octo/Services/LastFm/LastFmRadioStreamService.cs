@@ -29,6 +29,7 @@ public sealed class LastFmRadioStreamService
     private readonly RadioQueueStore _queues;
     private readonly LastFmRadioRefreshQueue _refreshQueue;
     private readonly IRadioTuneInSelector _tuneIn;
+    private readonly LastFmService? _lastFm;
     private readonly ILogger<LastFmRadioStreamService> _logger;
     private readonly ConcurrentDictionary<string, Task> _poolWarmers = new();
 
@@ -41,13 +42,15 @@ public sealed class LastFmRadioStreamService
         IMusicMetadataService metadata,
         RadioQueueStore queues, LastFmRadioRefreshQueue refreshQueue,
         IRadioTuneInSelector tuneIn,
-        ILogger<LastFmRadioStreamService> logger)
+        ILogger<LastFmRadioStreamService> logger,
+        LastFmService? lastFm = null)
     {
         _state = state; _settings = settings; _library = library; _proxy = proxy;
         _downloads = downloads; _transcoder = transcoder; _cache = cache;
         _sessions = sessions;
         _resolver = resolver; _metadata = metadata;
         _queues = queues; _refreshQueue = refreshQueue; _tuneIn = tuneIn; _logger = logger;
+        _lastFm = lastFm;
     }
 
     public LastFmRadioStation? Resolve(LastFmRadioStreamSession session)
@@ -358,19 +361,52 @@ public sealed class LastFmRadioStreamService
                     bitrateKbps, settings.EffectiveRadioLoudnessTarget, token);
         }, cancellationToken);
         // Only the producer holds a profile; joiners of the same single-flight get the
-        // path and read the sidecar the producer writes here.
-        if (profile is not null) _cache.SaveProfile(path, profile);
+        // path and read the sidecar the producer writes here. The tags ride along so
+        // the flow picker can weigh what a track is next to how it sounds.
+        if (profile is not null)
+            _cache.SaveProfile(path, profile with
+            {
+                Genre = candidate.Track.Genre,
+                Tags = await TagsForAsync(candidate.Track, cancellationToken),
+            });
         return candidate.Prepared(path);
+    }
+
+    /// <summary>Last.fm's top tags for the track, the artist's when the track has none.
+    /// Both are cached by <see cref="LastFmService"/>; a miss is an empty list, never a failure.</summary>
+    private async Task<IReadOnlyList<string>> TagsForAsync(LastFmRadioTrack track,
+        CancellationToken cancellationToken)
+    {
+        if (_lastFm is null || !_lastFm.HasApiKey) return [];
+        try
+        {
+            var tags = await _lastFm.GetTrackTopTagsAsync(track.Artist, track.Title, 8, cancellationToken);
+            if (tags.Count == 0) tags = await _lastFm.GetArtistTopTagsAsync(track.Artist, 8, cancellationToken);
+            return tags.Select(DiscoveryStationSettings.NormalizeTag)
+                .Where(tag => tag.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "No Last.fm tags for {Artist} - {Title}", track.Artist, track.Title);
+            return [];
+        }
     }
 
     /// <summary>How many upcoming snapshot tracks the flow picker may choose between.</summary>
     internal const int FlowWindow = 4;
 
+    /// <summary>Weight of kinship (tags, genre) against sound in the flow score. At 1.5 a
+    /// track from another genre costs more than an octave of brightness.</summary>
+    internal const double KinshipWeight = 1.5;
+
     /// <summary>
-    /// How far apart two tracks sound, from their measured profiles: brightness as
-    /// octaves between spectral centroids, dynamics as loudness range, texture as
-    /// spectral flatness. Loudness itself is not a term because every track has been
-    /// brought to the same level before it reaches the stream.
+    /// How far apart two tracks are as neighbours in a stream, as one score with two
+    /// halves. Sound: brightness as octaves between spectral centroids, dynamics as
+    /// loudness range, texture as spectral flatness (loudness itself is not a term
+    /// because every track has been brought to the same level). Kinship: one minus the
+    /// overlap of their Last.fm tags, the catalogue genre when tags are missing, and a
+    /// neutral middle when nothing is known so an unmeasured track is neither favoured
+    /// nor punished.
     /// </summary>
     internal static double FlowDistance(RadioAudioProfile current, RadioAudioProfile next)
     {
@@ -378,7 +414,21 @@ public sealed class LastFmRadioStreamService
             / Math.Max(20, current.SpectralCentroidHz)));
         var dynamics = Math.Abs(next.LoudnessRangeLu - current.LoudnessRangeLu) / 5d;
         var texture = Math.Abs(next.SpectralFlatness - current.SpectralFlatness) * 5d;
-        return brightness + dynamics + texture;
+        return brightness + dynamics + texture + KinshipWeight * Estrangement(current, next);
+    }
+
+    /// <summary>0 for the same tags, 1 for none in common, by genre when tags are missing.</summary>
+    internal static double Estrangement(RadioAudioProfile current, RadioAudioProfile next)
+    {
+        if (current.Tags is { Count: > 0 } mine && next.Tags is { Count: > 0 } theirs)
+        {
+            var shared = mine.Intersect(theirs, StringComparer.OrdinalIgnoreCase).Count();
+            var union = mine.Union(theirs, StringComparer.OrdinalIgnoreCase).Count();
+            return union == 0 ? 0.35 : 1d - (double)shared / union;
+        }
+        if (!string.IsNullOrWhiteSpace(current.Genre) && !string.IsNullOrWhiteSpace(next.Genre))
+            return string.Equals(current.Genre, next.Genre, StringComparison.OrdinalIgnoreCase) ? 0 : 0.7;
+        return 0.35;
     }
 
     /// <summary>
