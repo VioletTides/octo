@@ -420,11 +420,23 @@ public sealed class LastFmRadioRecommendationService
         return tags;
     }
 
-    private static void AddTag(Dictionary<string, double> scores, string value, double score)
+    /// <summary>
+    /// One spelling per tag, shared by seeding and by kinship: lower case, single
+    /// spaces, the alias table applied ("hip hop" and "hiphop" are "hip-hop"), and empty
+    /// for tags that describe the listener rather than the music ("seen live",
+    /// "owned", "favorites").
+    /// </summary>
+    internal static string CanonicalTag(string value)
     {
         var tag = DiscoveryStationSettings.NormalizeTag(value);
         if (TagAliases.TryGetValue(tag, out var alias)) tag = alias;
-        if (tag.Length == 0 || DeniedTags.Contains(tag)) return;
+        return DeniedTags.Contains(tag) ? string.Empty : tag;
+    }
+
+    private static void AddTag(Dictionary<string, double> scores, string value, double score)
+    {
+        var tag = CanonicalTag(value);
+        if (tag.Length == 0) return;
         scores[tag] = scores.GetValueOrDefault(tag) + score;
     }
 

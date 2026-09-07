@@ -380,16 +380,34 @@ public sealed class LastFmRadioStreamService
         if (_lastFm is null || !_lastFm.HasApiKey) return [];
         try
         {
-            var tags = await _lastFm.GetTrackTopTagsAsync(track.Artist, track.Title, 8, cancellationToken);
-            if (tags.Count == 0) tags = await _lastFm.GetArtistTopTagsAsync(track.Artist, 8, cancellationToken);
-            return tags.Select(DiscoveryStationSettings.NormalizeTag)
-                .Where(tag => tag.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var tags = await _lastFm.GetTrackTopTagsAsync(track.Artist, track.Title, 10, cancellationToken);
+            if (tags.Count == 0) tags = await _lastFm.GetArtistTopTagsAsync(track.Artist, 10, cancellationToken);
+            return KinshipTags(tags, track.Artist);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogDebug(ex, "No Last.fm tags for {Artist} - {Title}", track.Artist, track.Title);
             return [];
         }
+    }
+
+    /// <summary>
+    /// Last.fm tags with the ones that say nothing about kinship removed: years, the
+    /// artist's own name, and the listener-bookkeeping tags the recommender also
+    /// ignores. Two tracks by the same artist already share their sound; a shared
+    /// "2018" would only inflate the overlap.
+    /// </summary>
+    internal static IReadOnlyList<string> KinshipTags(IEnumerable<string> tags, string artist)
+    {
+        var artistTag = DiscoveryStationSettings.NormalizeTag(artist);
+        return tags.Select(LastFmRadioRecommendationService.CanonicalTag)
+            .Where(tag => tag.Length > 0
+                && !tag.Equals(artistTag, StringComparison.OrdinalIgnoreCase)
+                && !(tag.Length == 4 && tag.All(char.IsAsciiDigit))
+                && !tag.EndsWith("0s", StringComparison.Ordinal))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(8)
+            .ToList();
     }
 
     /// <summary>How many upcoming snapshot tracks the flow picker may choose between.</summary>
@@ -456,10 +474,12 @@ public sealed class LastFmRadioStreamService
         var station = Resolve(session);
         if (station is null) return [];
         var bitrateKbps = _settings.CurrentValue.EffectiveRadioStreamBitrateKbps;
+        // The cache key is the resolved source, not the station: a track that survives
+        // a refresh, or sits in two of a listener's stations, is transcoded once.
         return station.Tracks
             .Where(track => !string.IsNullOrWhiteSpace(track.ResolvedId))
             .Select((track, index) => new RadioCandidate(track, index,
-                _cache.Key(session.Username, station.Id, track.ResolvedId!, bitrateKbps)))
+                _cache.Key(session.Username, string.Empty, track.ResolvedId!, bitrateKbps)))
             .ToList();
     }
 

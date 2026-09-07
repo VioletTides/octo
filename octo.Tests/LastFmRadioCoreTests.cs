@@ -278,6 +278,15 @@ public class LastFmRadioCoreTests
     }
 
     [Fact]
+    public void KinshipTags_DropYearsTheArtistAndBookkeeping()
+    {
+        var kept = LastFmRadioStreamService.KinshipTags(
+            ["2018", "Xavier Wulf", "Hip Hop", "seen live", "Cloud Rap", "00s", "hip hop", "phonk"],
+            "Xavier Wulf");
+        Assert.Equal(["hip-hop", "cloud rap", "phonk"], kept);
+    }
+
+    [Fact]
     public void Flow_WeighsKinshipBesideSound()
     {
         // The current track is trap. One candidate sounds almost identical but is indie
