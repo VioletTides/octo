@@ -239,7 +239,8 @@ public sealed class LastFmRadioControllerTests
     [Fact]
     public async Task InternetRadioList_WaitsForStarterAndPublishesInThatSameResponse()
     {
-        await using var fixture = new RadioWebFactory();
+        // 0 is the unbounded wait: the original contract, kept available as a setting.
+        await using var fixture = new RadioWebFactory(starterPublishTimeoutSeconds: 0);
         fixture.InstallStation();
         fixture.Transcoder.CompletionGate = NewGate();
         using var client = fixture.CreateClient();
@@ -252,6 +253,31 @@ public sealed class LastFmRadioControllerTests
 
         fixture.Transcoder.CompletionGate.SetResult();
         Assert.Contains("Your Mix", await listing);
+    }
+
+    [Fact]
+    public async Task InternetRadioList_AnswersInsideTheStarterBoundAndPublishesOnTheNextRefresh()
+    {
+        await using var fixture = new RadioWebFactory(starterPublishTimeoutSeconds: 1);
+        fixture.InstallStation();
+        fixture.Transcoder.CompletionGate = NewGate();
+        using var client = fixture.CreateClient();
+
+        var url = "/rest/getInternetRadioStations?u=alice&t=token&s=salt&f=json";
+        var first = await client.GetStringAsync(url).WaitAsync(TimeSpan.FromSeconds(10));
+        await fixture.Transcoder.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.DoesNotContain("Your Mix", first);
+
+        // The transcode the first request stopped waiting for is still the one that
+        // makes the station ready; nothing has to start it again.
+        fixture.Transcoder.CompletionGate.SetResult();
+        var second = "";
+        for (var attempt = 0; attempt < 100 && !second.Contains("Your Mix"); attempt++)
+        {
+            await Task.Delay(100);
+            second = await client.GetStringAsync(url);
+        }
+        Assert.Contains("Your Mix", second);
     }
 
     [Fact]
@@ -529,14 +555,17 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     private readonly bool _exposePlaylists;
     private readonly bool _exposeStreams;
     private readonly bool _enableIcyMetadata;
+    private readonly int? _starterPublishTimeoutSeconds;
 
     public RadioWebFactory(string explicitFilter = "All", bool exposePlaylists = true,
-        bool exposeStreams = true, bool enableIcyMetadata = true)
+        bool exposeStreams = true, bool enableIcyMetadata = true,
+        int? starterPublishTimeoutSeconds = null)
     {
         _explicitFilter = explicitFilter;
         _exposePlaylists = exposePlaylists;
         _exposeStreams = exposeStreams;
         _enableIcyMetadata = enableIcyMetadata;
+        _starterPublishTimeoutSeconds = starterPublishTimeoutSeconds;
         Directory.CreateDirectory(_directory);
         Metadata.Setup(service => service.PrewarmYouTubeIdsAsync(
                 It.IsAny<IEnumerable<Octo.Models.Domain.Song>>(), It.IsAny<int>(),
@@ -591,6 +620,7 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
         builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
             new Dictionary<string, string?>
             {
+                ["LastFm:StarterPublishTimeoutSeconds"] = _starterPublishTimeoutSeconds?.ToString(),
                 ["Subsonic:Url"] = "http://navidrome.test",
                 ["Subsonic:AutoDetectDownloadPath"] = "false",
                 ["Subsonic:ExplicitFilter"] = _explicitFilter,

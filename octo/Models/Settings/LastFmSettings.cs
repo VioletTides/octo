@@ -40,6 +40,14 @@ public class LastFmSettings
     /// <summary>Embed the current station track as opt-in ICY stream metadata.</summary>
     public bool EnableIcyMetadata { get; set; } = true;
 
+    /// <summary>
+    /// How long a station-list request waits for a cold station's first track before
+    /// answering without it. Production keeps going in the background and the station
+    /// appears on the client's next refresh. 0 waits for the starter however long it
+    /// takes, which is the original behaviour.
+    /// </summary>
+    public int StarterPublishTimeoutSeconds { get; set; } = 8;
+
     public int HistoryRetentionDays { get; set; } = 90;
     public int DiscoveryPercent { get; set; } = 35;
     public int RefreshIntervalHours { get; set; } = 12;
@@ -52,6 +60,9 @@ public class LastFmSettings
     public int EffectiveDiscoveryPercent => Math.Clamp(DiscoveryPercent, 0, 100);
     public int EffectiveRefreshIntervalHours => Math.Clamp(RefreshIntervalHours, 1, 168);
     public int EffectiveMinimumPlays => Math.Clamp(MinimumPlays, 3, 100);
+    public TimeSpan? EffectiveStarterPublishTimeout => StarterPublishTimeoutSeconds <= 0
+        ? null
+        : TimeSpan.FromSeconds(Math.Clamp(StarterPublishTimeoutSeconds, 1, 300));
     public int EffectiveRadioStreamBitrateKbps => RadioStreamBitrateKbps switch
     {
         <= 96 => 96,

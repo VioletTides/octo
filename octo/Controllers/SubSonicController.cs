@@ -407,8 +407,30 @@ public class SubsonicController : ControllerBase
         {
             var token = _radioStreamSessions.Issue(username, station.Id, parameters);
             var session = _radioStreamSessions.Get(token)!;
-            var readyPool = await _radioStreams.PrepareForPublicationAsync(
+            var preparation = _radioStreams.PrepareForPublicationAsync(
                 session, HttpContext.RequestAborted);
+
+            // A cold starter is a YouTube fetch plus a transcode, tens of seconds on a
+            // small box, and many clients give up on a list request well before that.
+            // Answer inside the bound instead. The cache produces the track under its
+            // own single-flight regardless of who is still waiting, so the station is
+            // simply on the next refresh; the warmer below keeps its runway filling.
+            var bound = _lastFmSettings.EffectiveStarterPublishTimeout;
+            if (bound is { } limit
+                && await Task.WhenAny(preparation, Task.Delay(limit)) != preparation)
+            {
+                _ = preparation.ContinueWith(
+                    task => _ = task.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                _radioStreamSessions.Remove(token);
+                _radioStreams.WarmReadyPool(session);
+                _logger.LogInformation(
+                    "Continuous Radio starter for {Station} not ready within {Seconds}s; " +
+                    "publishing on the next refresh",
+                    station.Name, (int)limit.TotalSeconds);
+                return null;
+            }
+
+            var readyPool = await preparation;
             if (readyPool.Count == 0) { _radioStreamSessions.Remove(token); return null; }
             if (!_radioStreamSessions.AttachReadyPool(token, readyPool))
             {

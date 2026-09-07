@@ -516,6 +516,13 @@
             </div>
             <div class="set-row stack">
               <div class="set-info">
+                <div class="set-info-t">Wait for a cold station's first track (seconds)</div>
+                <div class="set-info-d">A station with nothing cached yet needs a fetch and a transcode before it can play. The station list answers within this bound and the station appears on the next refresh. 0 waits however long it takes. Default: 8.</div>
+              </div>
+              <input class="set-input" name="LastFm.StarterPublishTimeoutSeconds" type="number" min="0" max="300" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
                 <div class="set-info-t">Refresh stations every (hours)</div>
                 <div class="set-info-d">Rebuilds dynamic and pinned station queues in the background. The current snapshot stays playable until its replacement is ready. Default: 12 hours.</div>
               </div>
