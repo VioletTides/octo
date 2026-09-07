@@ -719,6 +719,46 @@ public class LastFmRadioRecommendationTests
         finally { try { Directory.Delete(directory, true); } catch { } }
     }
 
+    /// <summary>A draw that always returns the same number: order becomes pure weight order.</summary>
+    private sealed class FlatRandom : Random
+    {
+        public override double NextDouble() => 0.5;
+    }
+
+    [Fact]
+    public async Task Shaping_LeadsWithTheProviderRankAndPushesThePreviousSnapshotBehindNewTracks()
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-rank-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var settings = TestOptions.Monitor(new LastFmSettings
+            {
+                ApiKey = "key", RadioTrackCount = 10, EnablePersonalizedStations = false,
+                DiscoveryStations = [new() { Id = "fusion", Name = "Fusion", Tags = ["rock", "idm"] }]
+            });
+            var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
+                new ExternalIdRegistry(), new Mock<ILogger<LastFmRadioStateStore>>().Object);
+            var service = RecommendationService(settings, state, new RecommendationHandler());
+            service.Randomizer = () => new FlatRandom();
+            static int Rank(LastFmRadioTrack track) => int.Parse(track.Title.Split('-')[^1]);
+
+            // Both tags answer rank 0..19 at match 1.0. With the draw flattened, the ten
+            // picks are the five best-ranked of each tag, and rank 0 opens the station.
+            var first = Assert.Single(await service.BuildAsync("alice"));
+            Assert.Equal(0, Rank(first.Tracks[0]));
+            Assert.All(first.Tracks, track => Assert.InRange(Rank(track), 0, 4));
+
+            // Installed as the previous snapshot, those ten keep a third of their weight,
+            // which is less than any fresh candidate down to rank 19 carries. A refresh
+            // therefore continues down the ranking instead of restating the top.
+            state.ReplaceStations("alice", [first]);
+            var refreshed = Assert.Single(await service.BuildAsync("alice"));
+            Assert.All(refreshed.Tracks, track => Assert.InRange(Rank(track), 5, 9));
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
     [Fact]
     public async Task PersonalizedAndPinnedTogglesAreIndependentAndDoNotDeleteState()
     {
