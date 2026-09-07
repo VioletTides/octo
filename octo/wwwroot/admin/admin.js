@@ -894,6 +894,28 @@ document.getElementById('radio-reset')?.addEventListener('click', async event =>
 // ────────────────────────────────────────────────────────────────
 // Notifications: send a test through every configured transport
 // ────────────────────────────────────────────────────────────────
+document.getElementById('btn-check-listenbrainz')?.addEventListener('click', async () => {
+  const box = document.getElementById('check-listenbrainz-result');
+  const btn = document.getElementById('btn-check-listenbrainz');
+  if (!box) return;
+  box.hidden = false;
+  box.textContent = 'Checking…';
+  btn.disabled = true;
+  try {
+    // Check what is typed, saved or not, so a typo is caught before Save.
+    const typed = document.getElementById('f-lb-token')?.value?.trim() ?? '';
+    const r = await fetch('/api/admin/listenbrainz/validate' + (typed ? `?token=${encodeURIComponent(typed)}` : ''));
+    const d = await r.json();
+    box.textContent = !d.configured ? d.detail : d.valid ? `Valid · ${d.userName}` : `Not valid — ${d.detail}`;
+    box.classList.toggle('notice-error', !d.valid);
+  } catch (e) {
+    box.textContent = `Check failed: ${e.message}`;
+    box.classList.add('notice-error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 document.getElementById('btn-test-notification')?.addEventListener('click', async () => {
   const box = document.getElementById('test-notification-result');
   const btn = document.getElementById('btn-test-notification');

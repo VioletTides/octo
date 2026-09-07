@@ -69,6 +69,12 @@
             </svg>
             <span>Last.fm</span>
           </button>
+          <button class="sidebar-nav-item" data-tab="listenbrainz">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M3 12V4M6.5 12V7M10 12V5M13.5 12V9"/>
+            </svg>
+            <span>ListenBrainz</span>
+          </button>
           <button class="sidebar-nav-item" data-tab="notifications">
             <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M8 2a4 4 0 0 0-4 4v3L2.5 11h11L12 9V6a4 4 0 0 0-4-4z"/><path d="M6.5 13a1.5 1.5 0 0 0 3 0"/>
@@ -720,6 +726,46 @@
                 <div class="set-info-d">One summary per album: tracks fetched and how many are lossless. Per-track pings are muted during album downloads.</div>
               </div>
               <label class="switch"><input type="checkbox" id="f-notify-album" name="Notifications.NotifyAlbumCompleted" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- ─── LISTENBRAINZ ───────────────────────────────────── -->
+      <section data-pane="listenbrainz">
+        <header class="page-header">
+          <div>
+            <h1>ListenBrainz</h1>
+            <p>Keep plays of external tracks in your listening history. Plays of library tracks are already scrobbled by Navidrome; previews and Continuous Radio would otherwise be lost.</p>
+          </div>
+          <button class="btn" id="btn-check-listenbrainz" type="button">Check token</button>
+        </header>
+
+        <div id="check-listenbrainz-result" class="notice" hidden></div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Submission</h3></div>
+          <form data-section="listenbrainz" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Submit external plays</div>
+                <div class="set-info-d">A listen is sent when an external track is scrobbled by your client, or when a Continuous Radio track plays to the end.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-lb-enabled" name="ListenBrainz.SubmitExternalPlays" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">User token</div>
+                <div class="set-info-d">From <a href="https://listenbrainz.org/settings/" target="_blank" rel="noopener">listenbrainz.org/settings</a>. Applies to every Navidrome user without a token of their own. Leave empty to disable.</div>
+              </div>
+              <input class="set-input" id="f-lb-token" name="ListenBrainz.Token" type="password" autocomplete="off" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Per-user tokens <span class="set-opt">optional</span></div>
+                <div class="set-info-d">For installs with more than one listener: a Navidrome username and that person's own ListenBrainz token, as JSON, for example <code>{"alice": "token", "bob": "token"}</code>. Also settable as <code>LISTENBRAINZ__USERTOKENS__alice</code> in <code>.env</code>.</div>
+              </div>
+              <textarea class="set-input" id="f-lb-user-tokens" name="ListenBrainz.UserTokens" data-json="true" rows="3" spellcheck="false"></textarea>
             </div>
           </form>
         </div>

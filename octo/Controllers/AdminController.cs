@@ -34,6 +34,8 @@ public class AdminController : ControllerBase
     private readonly IOptionsMonitor<NotificationSettings> _notificationOpts;
     private readonly IOptionsMonitor<MetadataSettings> _metadataOpts;
     private readonly IOptionsMonitor<ServerSettings> _serverOpts;
+    private readonly IOptionsMonitor<ListenBrainzSettings>? _listenBrainzOpts;
+    private readonly Octo.Services.ListenBrainz.ListenBrainzService? _listenBrainz;
     private readonly Octo.Services.Notifications.NotificationService _notifications;
     private readonly IConfiguration _config;
     private readonly SoulseekClient _slskd;
@@ -77,8 +79,12 @@ public class AdminController : ControllerBase
         IHostApplicationLifetime lifetime,
         ILogger<AdminController> logger,
         LastFmRadioStateStore? radioState = null,
-        LastFmRadioRefreshQueue? radioRefresh = null)
+        LastFmRadioRefreshQueue? radioRefresh = null,
+        IOptionsMonitor<ListenBrainzSettings>? listenBrainzOpts = null,
+        Octo.Services.ListenBrainz.ListenBrainzService? listenBrainz = null)
     {
+        _listenBrainzOpts = listenBrainzOpts;
+        _listenBrainz = listenBrainz;
         _deezer = deezer;
         _coverArt = coverArt;
         _settings = settings;
@@ -144,6 +150,23 @@ public class AdminController : ControllerBase
                 preview = station.Tracks.Take(5).Select(track => new { track.Artist, track.Title })
             }) ?? []
         });
+    }
+
+    /// <summary>Checks the ListenBrainz token that applies to a listener (or the
+    /// default) against ListenBrainz, so a mistyped token shows up before a play is lost.</summary>
+    [HttpGet("listenbrainz/validate")]
+    public async Task<IActionResult> ValidateListenBrainz([FromQuery] string? user = null,
+        [FromQuery] string? token = null)
+    {
+        if (_listenBrainz is null || _listenBrainzOpts is null)
+            return Ok(new { configured = false, valid = false, detail = "ListenBrainz is not available." });
+        var candidate = string.IsNullOrWhiteSpace(token)
+            ? _listenBrainzOpts.CurrentValue.TokenFor(user ?? "") ?? ""
+            : token;
+        if (candidate.Length == 0)
+            return Ok(new { configured = false, valid = false, detail = "No token configured." });
+        var (valid, userName, detail) = await _listenBrainz.ValidateTokenAsync(candidate, HttpContext.RequestAborted);
+        return Ok(new { configured = true, valid, userName, detail });
     }
 
     [HttpPost("lastfm/radio/refresh")]
@@ -476,6 +499,13 @@ public class AdminController : ControllerBase
                 ["NotifyDownloadFailed"] = notif.NotifyDownloadFailed,
                 ["NotifyAlbumCompleted"] = notif.NotifyAlbumCompleted,
             },
+            ["ListenBrainz"] = new Dictionary<string, object>
+            {
+                ["Token"] = _listenBrainzOpts?.CurrentValue.Token ?? "",
+                ["SubmitExternalPlays"] = _listenBrainzOpts?.CurrentValue.SubmitExternalPlays ?? true,
+                ["UserTokens"] = _listenBrainzOpts?.CurrentValue.UserTokens
+                    ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            },
             ["_meta"] = new Dictionary<string, object>
             {
                 ["ConfigFilePath"] = _settings.FilePath,
@@ -680,6 +710,16 @@ public class AdminController : ControllerBase
                 ["NotifyDownloadFailed"] = notif.NotifyDownloadFailed,
                 ["NotifyAlbumCompleted"] = notif.NotifyAlbumCompleted,
             },
+            // Present even when unset: a section missing from this document is a
+            // section the next Raw Config save silently deletes.
+            ["ListenBrainz"] = new JsonObject
+            {
+                ["Token"] = _listenBrainzOpts?.CurrentValue.Token ?? "",
+                ["SubmitExternalPlays"] = _listenBrainzOpts?.CurrentValue.SubmitExternalPlays ?? true,
+                ["UserTokens"] = new JsonObject(
+                    (_listenBrainzOpts?.CurrentValue.UserTokens ?? new Dictionary<string, string>())
+                    .Select(pair => new KeyValuePair<string, JsonNode?>(pair.Key, pair.Value))),
+            },
         };
         var json = effective.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         return Content(json, "application/json");
@@ -776,6 +816,7 @@ public class AdminController : ControllerBase
             "Notifications:NotifyDownloadStarted", "Notifications:NotifyDownloadCompleted",
             "Notifications:NotifyLosslessFallback", "Notifications:NotifyDownloadFailed",
             "Notifications:NotifyAlbumCompleted",
+            "ListenBrainz:Token", "ListenBrainz:SubmitExternalPlays",
         };
         var rows = new List<object>();
         foreach (var k in keys)

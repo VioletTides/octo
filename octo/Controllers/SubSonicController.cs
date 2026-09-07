@@ -41,6 +41,7 @@ public class SubsonicController : ControllerBase
     private readonly PlaylistSyncService? _playlistSyncService;
     private readonly LastFmService? _lastFmService;
     private readonly LastFmRadioTrackResolver _radioTrackResolver;
+    private readonly Octo.Services.ListenBrainz.ListenBrainzService? _listenBrainz;
     private readonly IOptionsMonitor<LastFmSettings> _lastFmSettingsOptions;
     private LastFmSettings _lastFmSettings => _lastFmSettingsOptions.CurrentValue;
     private readonly CoverArtService? _coverArtService;
@@ -82,8 +83,10 @@ public class SubsonicController : ControllerBase
         CoverArtService? coverArtService = null,
         CoverArtAggregator? coverArtAggregator = null,
         LastFmRadioStateStore? radioStateStore = null,
-        LastFmRadioRefreshQueue? radioRefreshQueue = null)
+        LastFmRadioRefreshQueue? radioRefreshQueue = null,
+        Octo.Services.ListenBrainz.ListenBrainzService? listenBrainz = null)
     {
+        _listenBrainz = listenBrainz;
         subsonicSettingsOptions = subsonicSettings;
         _metadataService = metadataService;
         _localLibraryService = localLibraryService;
@@ -2173,14 +2176,22 @@ public class SubsonicController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// What a completed scrobble teaches: the radio profile (when personalised radio is
+    /// on) and, for an external track, the listener's ListenBrainz history. Navidrome
+    /// already scrobbles local tracks from the relayed call; an external id is unknown
+    /// to it, so without this the play is gone.
+    /// </summary>
     private async Task LearnFromScrobblesAsync(IReadOnlyList<string> ids,
         IReadOnlyList<string> submissions, IReadOnlyList<string> times,
         IReadOnlyDictionary<string, string> authenticatedParameters)
     {
-        if (_radioStateStore is null || !_lastFmSettings.EnableRadio
-            || !_lastFmSettings.EnablePersonalizedStations) return;
         var username = authenticatedParameters.GetValueOrDefault("u", "").Trim();
         if (username.Length == 0) return;
+        var learning = _radioStateStore is not null && _lastFmSettings.EnableRadio
+            && _lastFmSettings.EnablePersonalizedStations;
+        var submitting = _listenBrainz is not null && _listenBrainz.IsEnabledFor(username);
+        if (!learning && !submitting) return;
         var recorded = false;
         for (var index = 0; index < ids.Count; index++)
         {
@@ -2197,16 +2208,20 @@ public class SubsonicController : ControllerBase
                     try { playedAt = DateTimeOffset.FromUnixTimeMilliseconds(unix).UtcDateTime; }
                     catch (ArgumentOutOfRangeException) { /* retain now */ }
                 }
-                recorded |= _radioStateStore.RecordPlay(username, new LastFmRadioPlay
-                {
-                    SongId = ids[index], Artist = song.Artist, Title = song.Title,
-                    Album = song.Album, Genre = song.Genre, Duration = song.Duration,
-                    IsLocal = song.IsLocal, PlayedAtUtc = playedAt, Source = "scrobble"
-                });
+                if (learning)
+                    recorded |= _radioStateStore!.RecordPlay(username, new LastFmRadioPlay
+                    {
+                        SongId = ids[index], Artist = song.Artist, Title = song.Title,
+                        Album = song.Album, Genre = song.Genre, Duration = song.Duration,
+                        IsLocal = song.IsLocal, PlayedAtUtc = playedAt, Source = "scrobble"
+                    });
+                if (submitting && !song.IsLocal)
+                    await _listenBrainz!.SubmitListenAsync(username, song.Artist, song.Title,
+                        song.Album, song.Duration, playedAt, HttpContext.RequestAborted);
             }
             catch (Exception ex) { _logger.LogDebug(ex, "Radio ignored unreadable scrobble {Id}", ids[index]); }
         }
-        if (!recorded || _radioRefreshQueue is null) return;
+        if (!learning || !recorded || _radioRefreshQueue is null) return;
         var user = _radioStateStore.GetUser(username);
         if (LastFmRadioRefreshPolicy.ShouldRefreshAfterPlay(user, _lastFmSettings))
             _radioRefreshQueue.Enqueue(username);

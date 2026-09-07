@@ -43,7 +43,8 @@ public sealed class LastFmRadioStreamService
         RadioQueueStore queues, LastFmRadioRefreshQueue refreshQueue,
         IRadioTuneInSelector tuneIn,
         ILogger<LastFmRadioStreamService> logger,
-        LastFmService? lastFm = null)
+        LastFmService? lastFm = null,
+        Octo.Services.ListenBrainz.ListenBrainzService? listenBrainz = null)
     {
         _state = state; _settings = settings; _library = library; _proxy = proxy;
         _downloads = downloads; _transcoder = transcoder; _cache = cache;
@@ -51,7 +52,10 @@ public sealed class LastFmRadioStreamService
         _resolver = resolver; _metadata = metadata;
         _queues = queues; _refreshQueue = refreshQueue; _tuneIn = tuneIn; _logger = logger;
         _lastFm = lastFm;
+        _listenBrainz = listenBrainz;
     }
+
+    private readonly Octo.Services.ListenBrainz.ListenBrainzService? _listenBrainz;
 
     public LastFmRadioStation? Resolve(LastFmRadioStreamSession session)
     {
@@ -555,7 +559,16 @@ public sealed class LastFmRadioStreamService
             IsLocal = song.IsLocal,
             Source = "internet-radio", PlayedAtUtc = DateTime.UtcNow,
         });
-        if (!song.IsLocal) return;
+        if (!song.IsLocal)
+        {
+            // A local track's play is scrobbled by Navidrome below; an external one
+            // would otherwise vanish from the listener's history. Not awaited: the
+            // stream is mid-song and a listen is a record, not a step.
+            if (_listenBrainz is not null)
+                _ = _listenBrainz.SubmitListenAsync(session.Username, track.Artist, track.Title,
+                    track.Album, track.Duration ?? song.Duration, DateTime.UtcNow);
+            return;
+        }
         var parameters = session.Authentication.ToDictionary(pair => pair.Key, pair => pair.Value,
             StringComparer.OrdinalIgnoreCase);
         parameters["id"] = id;

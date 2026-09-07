@@ -278,6 +278,25 @@ public class LastFmRadioCoreTests
     }
 
     [Fact]
+    public void ListenBrainzSettings_PickTheListenersTokenThenTheDefaultAndRespectTheSwitch()
+    {
+        var settings = new Octo.Models.Settings.ListenBrainzSettings
+        {
+            Token = " default ",
+            UserTokens = new(StringComparer.OrdinalIgnoreCase) { ["Bob"] = "bobs", ["carol"] = "  " },
+        };
+        Assert.Equal("bobs", settings.TokenFor("bob"));
+        Assert.Equal("default", settings.TokenFor("carol"));
+        Assert.Equal("default", settings.TokenFor("alice"));
+        Assert.Equal("default", settings.TokenFor(""));
+        settings.Token = "";
+        Assert.Null(settings.TokenFor("alice"));
+        Assert.Equal("bobs", settings.TokenFor("bob"));
+        settings.SubmitExternalPlays = false;
+        Assert.Null(settings.TokenFor("bob"));
+    }
+
+    [Fact]
     public void KinshipTags_DropYearsTheArtistAndBookkeeping()
     {
         var kept = LastFmRadioStreamService.KinshipTags(

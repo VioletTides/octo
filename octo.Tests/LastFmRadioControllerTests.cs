@@ -116,6 +116,65 @@ public sealed class LastFmRadioControllerTests
     }
 
     [Fact]
+    public async Task ExternalScrobble_SubmitsAListenWithTheListenersToken_LocalOnesDoNot()
+    {
+        await using var fixture = new RadioWebFactory();
+        var registry = fixture.Services.GetRequiredService<Octo.Services.Soulseek.ExternalIdRegistry>();
+        var externalId = registry.Register(new Octo.Services.Soulseek.SoulseekRouting
+        {
+            Kind = Octo.Services.Soulseek.RoutingKind.Song, Artist = "Bladee", Title = "Be Nice 2 Me",
+            Album = "Icedancer", Duration = 154,
+        });
+        using var client = fixture.CreateClient();
+
+        // bob has his own token; the play carries his artist, title, album and duration.
+        using var bob = await client.PostAsync("/rest/scrobble", new FormUrlEncodedContent(new[]
+        {
+            new KeyValuePair<string,string>("u", "bob"), new("f", "json"),
+            new("id", externalId), new("submission", "true"), new("time", "1757200000000")
+        }));
+        bob.EnsureSuccessStatusCode();
+        var submission = Assert.Single(fixture.Handler.ListenBrainzSubmissions);
+        Assert.Equal("Token lb-bob-token", submission.Authorization);
+        using var document = JsonDocument.Parse(submission.Body);
+        Assert.Equal("single", document.RootElement.GetProperty("listen_type").GetString());
+        var listen = document.RootElement.GetProperty("payload")[0];
+        Assert.Equal(1757200000, listen.GetProperty("listened_at").GetInt64());
+        var metadata = listen.GetProperty("track_metadata");
+        Assert.Equal("Bladee", metadata.GetProperty("artist_name").GetString());
+        Assert.Equal("Be Nice 2 Me", metadata.GetProperty("track_name").GetString());
+        Assert.Equal("Icedancer", metadata.GetProperty("release_name").GetString());
+        Assert.Equal(154000, metadata.GetProperty("additional_info").GetProperty("duration_ms").GetInt32());
+        Assert.Equal("Octo", metadata.GetProperty("additional_info").GetProperty("submission_client").GetString());
+
+        // alice falls back to the default token; a start-only scrobble sends nothing.
+        using var alice = await client.PostAsync("/rest/scrobble", new FormUrlEncodedContent(new[]
+        {
+            new KeyValuePair<string,string>("u", "alice"), new("f", "json"),
+            new("id", externalId), new("submission", "true")
+        }));
+        alice.EnsureSuccessStatusCode();
+        Assert.Equal("Token lb-default-token", fixture.Handler.ListenBrainzSubmissions[^1].Authorization);
+        using var startOnly = await client.PostAsync("/rest/scrobble", new FormUrlEncodedContent(new[]
+        {
+            new KeyValuePair<string,string>("u", "alice"), new("f", "json"),
+            new("id", externalId), new("submission", "false")
+        }));
+        startOnly.EnsureSuccessStatusCode();
+        Assert.Equal(2, fixture.Handler.ListenBrainzSubmissions.Count);
+
+        // A local track is Navidrome's to scrobble; Octo relays it and stays quiet.
+        using var local = await client.PostAsync("/rest/scrobble", new FormUrlEncodedContent(new[]
+        {
+            new KeyValuePair<string,string>("u", "alice"), new("f", "json"),
+            new("id", "one"), new("submission", "true")
+        }));
+        local.EnsureSuccessStatusCode();
+        Assert.Equal(["one"], fixture.Handler.RelayedScrobbleIds);
+        Assert.Equal(2, fixture.Handler.ListenBrainzSubmissions.Count);
+    }
+
+    [Fact]
     public async Task AuthenticationFailure_DoesNotExposeStationsOrLearnScrobbles()
     {
         await using var fixture = new RadioWebFactory();
@@ -651,6 +710,8 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
             new Dictionary<string, string?>
             {
                 ["LastFm:StarterPublishTimeoutSeconds"] = _starterPublishTimeoutSeconds?.ToString(),
+                ["ListenBrainz:Token"] = "lb-default-token",
+                ["ListenBrainz:UserTokens:bob"] = "lb-bob-token",
                 ["Subsonic:Url"] = "http://navidrome.test",
                 ["Subsonic:AutoDetectDownloadPath"] = "false",
                 ["Subsonic:ExplicitFilter"] = _explicitFilter,
@@ -736,9 +797,22 @@ internal sealed class RadioUpstreamHandler : HttpMessageHandler
 {
     public IReadOnlyList<string> RelayedScrobbleIds { get; private set; } = [];
     public bool ReturnLocalMatches { get; set; } = true;
+    public List<(string Authorization, string Body)> ListenBrainzSubmissions { get; } = [];
 
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
         CancellationToken cancellationToken)
+    {
+        if (request.RequestUri!.Host.Equals("api.listenbrainz.org", StringComparison.OrdinalIgnoreCase))
+        {
+            var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
+            ListenBrainzSubmissions.Add((request.Headers.Authorization?.ToString() ?? "", body));
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent("{\"status\":\"ok\"}", Encoding.UTF8, "application/json") };
+        }
+        return await SendUpstreamAsync(request);
+    }
+
+    private Task<HttpResponseMessage> SendUpstreamAsync(HttpRequestMessage request)
     {
         var path = request.RequestUri!.AbsolutePath.Trim('/');
         var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri.Query);

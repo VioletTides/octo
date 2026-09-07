@@ -69,6 +69,13 @@ builder.Services.Configure<MetadataSettings>(
     builder.Configuration.GetSection("Metadata"));
 builder.Services.Configure<ServerSettings>(
     builder.Configuration.GetSection("Server"));
+builder.Services.Configure<ListenBrainzSettings>(
+    builder.Configuration.GetSection("ListenBrainz"));
+// Listens are records of plays that already happened; a slow ListenBrainz must not
+// hold a scrobble response or a radio stream, so the client is short-fused.
+builder.Services.AddHttpClient(Octo.Services.ListenBrainz.ListenBrainzService.ClientName,
+    c => c.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddSingleton<Octo.Services.ListenBrainz.ListenBrainzService>();
 
 builder.Services.AddSingleton<ILocalLibraryService, LocalLibraryService>();
 
