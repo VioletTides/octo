@@ -3,6 +3,7 @@ using System.Text.Json;
 using Octo.Models.Domain;
 using Octo.Models.Search;
 using Octo.Models.Subsonic;
+using Octo.Services.CoverArt;
 using Octo.Services.Metadata;
 using Octo.Services.YouTube;
 
@@ -26,17 +27,20 @@ public class SoulseekMetadataService : IMusicMetadataService
     private readonly YouTubeResolver _youtube;
     private readonly ExternalIdRegistry _idRegistry;
     private readonly DeezerMetadataService _deezer;
+    private readonly CoverArtAggregator _coverArt;
     private readonly ILogger<SoulseekMetadataService> _logger;
 
     public SoulseekMetadataService(
         YouTubeResolver youtube,
         ExternalIdRegistry idRegistry,
         DeezerMetadataService deezer,
+        CoverArtAggregator coverArt,
         ILogger<SoulseekMetadataService> logger)
     {
         _youtube = youtube;
         _idRegistry = idRegistry;
         _deezer = deezer;
+        _coverArt = coverArt;
         _logger = logger;
     }
 
@@ -190,7 +194,7 @@ public class SoulseekMetadataService : IMusicMetadataService
                 // Deezer duration as a hint so it picks the closest-length canonical
                 // video (not a long-form/compilation upload); playback reuses the
                 // stored videoId, so the shown length matches the audio.
-                var hit = await _youtube.MetaAsync($"{song.Artist} {song.Title}", song.Duration, ct);
+                var hit = await _youtube.MetaAsync($"{song.Artist} {song.Title}", song.Duration, ct: ct);
                 if (hit is { VideoId.Length: > 0 } && hit.Duration is int d && d > 0)
                 {
                     song.Duration = d;
@@ -269,11 +273,42 @@ public class SoulseekMetadataService : IMusicMetadataService
         return Task.WhenAll(tasks);
     }
 
-    public async Task<List<Album>> SearchAlbumsAsync(string query, int limit = 20)
+    /// <summary>
+    /// Fire-and-forget background prewarm of cover art for the first <paramref name="topN"/>
+    /// songs of a search, so a client that renders them a moment later finds the image
+    /// already in <see cref="CoverArtAggregator"/>'s cache. Shares <see cref="_prewarmGate"/>
+    /// with the YouTube prewarm above and passes background: true through to the cover
+    /// sources so this can never queue behind a live search or getCoverArt request.
+    /// </summary>
+    public Task PrewarmCoverArtAsync(IEnumerable<Song> songs, int topN, CancellationToken ct = default)
+    {
+        var targets = songs.Where(s => !s.IsLocal).Take(topN).ToList();
+        if (targets.Count == 0) return Task.CompletedTask;
+
+        var tasks = targets.Select(async song =>
+        {
+            if (!await _prewarmGate.WaitAsync(PrewarmQueueWait, ct)) return;
+            try
+            {
+                var routing = _idRegistry.Lookup(song.Id) ?? new SoulseekRouting
+                {
+                    Kind = RoutingKind.Song,
+                    Artist = song.Artist,
+                    Title = song.Title,
+                };
+                await _coverArt.GetCoverAsync(routing, background: true, ct);
+            }
+            catch { /* best-effort warm; never throw out of fire-and-forget */ }
+            finally { _prewarmGate.Release(); }
+        });
+        return Task.WhenAll(tasks);
+    }
+
+    public async Task<List<Album>> SearchAlbumsAsync(string query, int limit = 20, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(query) || limit <= 0) return new List<Album>();
 
-        var hits = await _deezer.SearchAlbumsAsync(query, limit);
+        var hits = await _deezer.SearchAlbumsAsync(query, limit, ct);
         var albums = new List<Album>(hits.Count);
 
         foreach (var hit in hits)
