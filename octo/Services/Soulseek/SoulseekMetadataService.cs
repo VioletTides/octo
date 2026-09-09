@@ -183,6 +183,13 @@ public class SoulseekMetadataService : IMusicMetadataService
     private readonly SemaphoreSlim _prewarmGate = new(3);
     private static readonly TimeSpan PrewarmQueueWait = TimeSpan.FromSeconds(2);
 
+    // Cover art never touches the shim: it hits Deezer/iTunes/Last.fm over HTTP, and
+    // Deezer's own background lane (DeezerRateLimiter.BackgroundPermits) already bounds
+    // that traffic. It needs its own gate, not _prewarmGate above: sharing that one meant
+    // 24 cover-art tasks and 12 YouTube tasks fought over 3 permits with a 2s bounded
+    // wait, so most cover fetches timed out and the ones that won starved YouTube prewarm.
+    private readonly SemaphoreSlim _coverArtPrewarmGate = new(6);
+
     public async Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default)
     {
         var tasks = songs.Where(s => !s.IsLocal).Take(TopDurationResolveLimit).Select(async song =>
@@ -276,9 +283,10 @@ public class SoulseekMetadataService : IMusicMetadataService
     /// <summary>
     /// Fire-and-forget background prewarm of cover art for the first <paramref name="topN"/>
     /// songs of a search, so a client that renders them a moment later finds the image
-    /// already in <see cref="CoverArtAggregator"/>'s cache. Shares <see cref="_prewarmGate"/>
-    /// with the YouTube prewarm above and passes background: true through to the cover
-    /// sources so this can never queue behind a live search or getCoverArt request.
+    /// already in <see cref="CoverArtAggregator"/>'s cache. Uses its own
+    /// <see cref="_coverArtPrewarmGate"/>, separate from the shim-bound YouTube prewarm
+    /// gate, and passes background: true through to the cover sources so this can never
+    /// queue behind a live search or getCoverArt request.
     /// </summary>
     public Task PrewarmCoverArtAsync(IEnumerable<Song> songs, int topN, CancellationToken ct = default)
     {
@@ -287,7 +295,7 @@ public class SoulseekMetadataService : IMusicMetadataService
 
         var tasks = targets.Select(async song =>
         {
-            if (!await _prewarmGate.WaitAsync(PrewarmQueueWait, ct)) return;
+            if (!await _coverArtPrewarmGate.WaitAsync(PrewarmQueueWait, ct)) return;
             try
             {
                 var routing = _idRegistry.Lookup(song.Id) ?? new SoulseekRouting
@@ -299,7 +307,7 @@ public class SoulseekMetadataService : IMusicMetadataService
                 await _coverArt.GetCoverAsync(routing, background: true, ct);
             }
             catch { /* best-effort warm; never throw out of fire-and-forget */ }
-            finally { _prewarmGate.Release(); }
+            finally { _coverArtPrewarmGate.Release(); }
         });
         return Task.WhenAll(tasks);
     }

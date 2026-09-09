@@ -40,7 +40,7 @@ public sealed class ExternalSearchService
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>Deadline for one album build. Deezer's own client timeout already bounds
-    /// each call inside it; this is the ceiling on the whole build, retries included.</summary>
+    /// the call inside it; this is the ceiling on the whole build.</summary>
     private static readonly TimeSpan AlbumBuildTimeout = TimeSpan.FromSeconds(10);
 
     // Amperfy (and most Subsonic clients' type-ahead) fires one search3 call per
