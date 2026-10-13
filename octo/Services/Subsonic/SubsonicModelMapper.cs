@@ -1,8 +1,10 @@
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
+using Octo.Models.Domain;
 using Octo.Models.Search;
 using Octo.Models.Subsonic;
+using Octo.Services.Common;
 
 namespace Octo.Services.Subsonic;
 
@@ -105,30 +107,61 @@ public class SubsonicModelMapper
     /// <summary>
     /// Merges local and external search results (songs, albums, artists, playlists).
     /// </summary>
+    /// <param name="trailingLocalSongs">
+    /// Library rows that follow the outside ones. Only a later page of a search has any:
+    /// there the rest of the library comes after the outside songs page one started.
+    /// </param>
     public (List<object> MergedSongs, List<object> MergedAlbums, List<object> MergedArtists) MergeSearchResults(
         List<object> localSongs,
         List<object> localAlbums,
         List<object> localArtists,
         SearchResult externalResult,
         List<ExternalPlaylist> externalPlaylists,
-        bool isJson)
+        bool isJson,
+        List<object>? trailingLocalSongs = null)
     {
+        var trailing = trailingLocalSongs ?? new List<object>();
         if (isJson)
         {
-            return MergeSearchResultsJson(localSongs, localAlbums, localArtists, externalResult, externalPlaylists);
+            return MergeSearchResultsJson(localSongs, localAlbums, localArtists, externalResult, externalPlaylists, trailing);
         }
         else
         {
-            return MergeSearchResultsXml(localSongs, localAlbums, localArtists, externalResult, externalPlaylists);
+            return MergeSearchResultsXml(localSongs, localAlbums, localArtists, externalResult, externalPlaylists, trailing);
         }
     }
+
+    /// <summary>
+    /// Dedup keys for library rows as <see cref="ParseSearchResponse"/> returns them, JSON or
+    /// XML. The same keys the merge uses to leave out an outside song you already own.
+    /// </summary>
+    internal static HashSet<string> LocalSongKeys(IEnumerable<object> localSongs)
+    {
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var song in localSongs)
+        {
+            var key = song switch
+            {
+                Dictionary<string, object> dict => SongKey(Text(dict, "artist"), Text(dict, "title")),
+                XElement element => SongKey(element.Attribute("artist")?.Value, element.Attribute("title")?.Value),
+                _ => null,
+            };
+            if (key is not null) keys.Add(key);
+        }
+        return keys;
+    }
+
+    /// <summary>True when <paramref name="song"/> is one of the library rows behind <paramref name="keys"/>.</summary>
+    internal static bool IsListed(Song song, IReadOnlySet<string> keys)
+        => SongKey(song.Artist, song.Title) is string key && keys.Contains(key);
 
     private (List<object> MergedSongs, List<object> MergedAlbums, List<object> MergedArtists) MergeSearchResultsJson(
         List<object> localSongs,
         List<object> localAlbums,
         List<object> localArtists,
         SearchResult externalResult,
-        List<ExternalPlaylist> externalPlaylists)
+        List<ExternalPlaylist> externalPlaylists,
+        List<object> trailingLocalSongs)
     {
         // Local songs first, external (YouTube placeholder) after. The earlier
         // version flipped this to put externals first because Arpeggi's "play
@@ -137,13 +170,21 @@ public class SubsonicModelMapper
         // radio goes through getSimilarSongs2, so search3 is plain search and
         // users expect their owned tracks to top the results, with discovery
         // suggestions following.
+        // An outside song you already own is not listed again under it.
+        var localSongKeys = localSongs.Concat(trailingLocalSongs).OfType<Dictionary<string, object>>()
+            .Select(dict => SongKey(Text(dict, "artist"), Text(dict, "title")))
+            .OfType<string>()
+            .ToHashSet(StringComparer.Ordinal);
         var mergedSongs = localSongs
-            .Concat(externalResult.Songs.Select(s => _responseBuilder.ConvertSongToJson(s)))
+            .Concat(externalResult.Songs
+                .Where(s => SongKey(s.Artist, s.Title) is not string k || !localSongKeys.Contains(k))
+                .Select(s => _responseBuilder.ConvertSongToJson(s)))
+            .Concat(trailingLocalSongs)
             .ToList();
         
         // Albums, deduplicated by artist+name so an album you own is not listed twice.
         // Playlists follow, appearing as albums with genre "Playlist".
-        var localAlbumKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var localAlbumKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var album in localAlbums)
         {
             if (album is not Dictionary<string, object> dict) continue;
@@ -161,20 +202,20 @@ public class SubsonicModelMapper
             .ToList();
         
         // Deduplicate artists by name - prefer local artists over external ones
-        var localArtistNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var localArtistNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var artist in localArtists)
         {
             if (artist is Dictionary<string, object> dict && dict.TryGetValue("name", out var nameObj))
             {
-                localArtistNames.Add(nameObj?.ToString() ?? "");
+                localArtistNames.Add(SongIdentity.Key(nameObj?.ToString()));
             }
         }
-        
+
         var mergedArtists = localArtists.ToList();
         foreach (var externalArtist in externalResult.Artists)
         {
             // Only add external artist if no local artist with same name exists
-            if (!localArtistNames.Contains(externalArtist.Name))
+            if (!localArtistNames.Contains(SongIdentity.Key(externalArtist.Name)))
             {
                 mergedArtists.Add(_responseBuilder.ConvertArtistToJson(externalArtist));
             }
@@ -188,20 +229,21 @@ public class SubsonicModelMapper
         List<object> localAlbums,
         List<object> localArtists,
         SearchResult externalResult,
-        List<ExternalPlaylist> externalPlaylists)
+        List<ExternalPlaylist> externalPlaylists,
+        List<object> trailingLocalSongs)
     {
         var ns = XNamespace.Get("http://subsonic.org/restapi");
         
         // Deduplicate artists by name - prefer local artists over external ones
-        var localArtistNamesXml = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var localArtistNamesXml = new HashSet<string>(StringComparer.Ordinal);
         var mergedArtists = new List<object>();
-        
+
         foreach (var artist in localArtists.Cast<XElement>())
         {
             var name = artist.Attribute("name")?.Value;
             if (!string.IsNullOrEmpty(name))
             {
-                localArtistNamesXml.Add(name);
+                localArtistNamesXml.Add(SongIdentity.Key(name));
             }
             artist.Name = ns + "artist";
             mergedArtists.Add(artist);
@@ -210,14 +252,14 @@ public class SubsonicModelMapper
         foreach (var artist in externalResult.Artists)
         {
             // Only add external artist if no local artist with same name exists
-            if (!localArtistNamesXml.Contains(artist.Name))
+            if (!localArtistNamesXml.Contains(SongIdentity.Key(artist.Name)))
             {
                 mergedArtists.Add(_responseBuilder.ConvertArtistToXml(artist, ns));
             }
         }
         
         // Albums, deduplicated by artist+name so an album you own is not listed twice.
-        var localAlbumKeysXml = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var localAlbumKeysXml = new HashSet<string>(StringComparer.Ordinal);
         var mergedAlbums = new List<object>();
         foreach (var album in localAlbums.Cast<XElement>())
         {
@@ -238,25 +280,50 @@ public class SubsonicModelMapper
             mergedAlbums.Add(ConvertPlaylistToAlbumXml(playlist, ns));
         }
         
-        // Songs
+        // Songs, without an outside song you already own
         var mergedSongs = new List<object>();
+        var localSongKeysXml = new HashSet<string>(StringComparer.Ordinal);
         foreach (var song in localSongs.Cast<XElement>())
         {
             song.Name = ns + "song";
             mergedSongs.Add(song);
+            if (SongKey(song.Attribute("artist")?.Value, song.Attribute("title")?.Value) is string key)
+                localSongKeysXml.Add(key);
+        }
+        foreach (var song in trailingLocalSongs.Cast<XElement>())
+        {
+            if (SongKey(song.Attribute("artist")?.Value, song.Attribute("title")?.Value) is string key)
+                localSongKeysXml.Add(key);
         }
         foreach (var song in externalResult.Songs)
         {
+            if (SongKey(song.Artist, song.Title) is string key && localSongKeysXml.Contains(key)) continue;
             mergedSongs.Add(_responseBuilder.ConvertSongToXml(song, ns));
+        }
+        foreach (var song in trailingLocalSongs.Cast<XElement>())
+        {
+            song.Name = ns + "song";
+            mergedSongs.Add(song);
         }
 
         return (mergedSongs, mergedAlbums, mergedArtists);
     }
     
-    /// <summary>Dedup key for an album. Null when there is not enough to compare on,
-    /// which means "never treat this as a duplicate".</summary>
-    private static string? AlbumKey(string? artist, string? name)
-        => string.IsNullOrWhiteSpace(name) ? null : $"{artist?.Trim()}|{name.Trim()}";
+    /// <summary>Dedup key for an album, case, accents and punctuation ignored. Null when there
+    /// is not enough to compare on, which means "never treat this as a duplicate". Shared with
+    /// the native album search, so both APIs agree on what counts as the same album.</summary>
+    internal static string? AlbumKey(string? artist, string? name)
+        => string.IsNullOrWhiteSpace(name) ? null : $"{SongIdentity.Key(artist)}|{SongIdentity.Key(name)}";
+
+    /// <summary>Dedup key for a song: one song in one version, however its artist and title are
+    /// written ("Drake feat. Rihanna" or "Too Good (feat. Rihanna)"). A live take or a remix
+    /// keeps its own. Null without both an artist and a title.</summary>
+    private static string? SongKey(string? artist, string? title)
+        => SongIdentity.Key(artist).Length == 0 || SongIdentity.Key(title).Length == 0
+            ? null : SongIdentity.MatchKey(artist, title);
+
+    private static string? Text(Dictionary<string, object> dict, string name)
+        => dict.TryGetValue(name, out var value) ? value?.ToString() : null;
 
     /// <summary>
     /// Converts an ExternalPlaylist to a JSON object representing an album.

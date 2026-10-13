@@ -78,7 +78,15 @@ public enum FolderStructure
     /// Flat file structure: Artist - Title.flac (all files in root)
     /// Better for simple libraries without nested folders
     /// </summary>
-    Flat
+    Flat,
+
+    /// <summary>
+    /// One folder per artist, no album folder: Artist/Title.flac
+    /// For a library built a track at a time, where Organized makes a folder per
+    /// single and Flat makes one directory of thousands of files. The album is
+    /// still in the tags, so a server that reads tags shows it either way.
+    /// </summary>
+    ByArtist
 }
 
 /// <summary>
@@ -197,7 +205,65 @@ public class SubsonicSettings
     /// Playlists appear as "albums" in search results with genre "Playlist"
     /// </summary>
     public bool EnableExternalPlaylists { get; set; } = true;
-    
+
+    /// <summary>
+    /// Include Last.fm/Deezer discovery songs and albums in search3/search2 results
+    /// (default: true).
+    /// Environment variable: ENABLE_SEARCH_DISCOVERY
+    ///
+    /// Off, search returns only local library matches: every result plays straight from
+    /// Navidrome instead of resolving through the YouTube shim on first tap, and a search
+    /// no longer waits on Deezer/Last.fm at all. getTopSongs and "Popular right now" follow
+    /// it too: off, they list only the library's songs. Radio (getSimilarSongs2) and the
+    /// Last.fm personalized/discovery stations are unaffected either way.
+    /// </summary>
+    public bool EnableSearchDiscovery { get; set; } = true;
+
+    /// <summary>
+    /// Resolve the YouTube durations of the top discovery rows before search3/search2
+    /// answers (default: true).
+    /// Environment variable: WAIT_FOR_SEARCH_DURATIONS
+    ///
+    /// Off, search answers with Deezer's durations, which saves a few seconds per new query,
+    /// and finds the YouTube ones in the background. Rows already sent keep Deezer's length.
+    /// getSong and the Navidrome API's song lookup report the YouTube length once it is
+    /// known, so apps that look the song up again when it starts show the right length;
+    /// apps that only use the length from the search results show Deezer's.
+    /// </summary>
+    public bool WaitForSearchDurations { get; set; } = true;
+
+    /// <summary>
+    /// Give clients that sync the library to the device a discovery catalog (default: true).
+    /// Environment variable: ENABLE_SYNC_CATALOG
+    ///
+    /// Symfonium copies the whole library by paging search3 with an empty query and then
+    /// searches only that copy, so a typed search never reaches Octo. With this on, the
+    /// copy continues past the last library song with your radio stations' tracks that the
+    /// library does not own. On the device they search, browse and play like any other
+    /// song, the station playlists find their tracks, and a heart downloads one as usual.
+    /// Applies only to the clients named in SyncCatalogClients.
+    /// </summary>
+    public bool EnableSyncCatalog { get; set; } = true;
+
+    /// <summary>
+    /// Clients that get the sync catalog, comma-separated, matched against the client name
+    /// the app sends (the Subsonic <c>c</c> parameter), ignoring case (default: "Symfonium").
+    /// Environment variable: SYNC_CATALOG_CLIENTS
+    ///
+    /// A named client sees catalog songs in its library views, which is the point for an app
+    /// that only ever searches its own copy and noise for one that searches the server. So
+    /// name only the first kind.
+    /// </summary>
+    public string SyncCatalogClients { get; set; } = "Symfonium";
+
+    /// <summary>
+    /// The most songs one user's sync catalog holds (default: 1000, range 50-5000).
+    /// Environment variable: SYNC_CATALOG_MAX_SONGS
+    /// </summary>
+    public int SyncCatalogMaxSongs { get; set; } = 1000;
+
+    public int EffectiveSyncCatalogMaxSongs => Math.Clamp(SyncCatalogMaxSongs, 50, 5000);
+
     /// <summary>
     /// Directory name for storing playlist .m3u files (default: "playlists")
     /// Environment variable: PLAYLISTS_DIRECTORY
@@ -220,6 +286,36 @@ public class SubsonicSettings
     /// long job; turn this off to keep song-starring without the larger commitment.
     /// </summary>
     public bool DownloadAlbumOnStar { get; set; } = true;
+
+    /// <summary>
+    /// Record which Subsonic user asked for each download (default: true)
+    /// Environment variable: RECORD_REQUESTED_BY
+    /// The username reaches the fetched-songs log and the download notification, so on a
+    /// shared library you can tell one person's acquisitions from another's. Turning it off
+    /// stops the name being captured at all rather than hiding it afterwards, so nothing
+    /// downstream ever holds it. Entries written while it was on keep their names.
+    /// </summary>
+    public bool RecordRequestedBy { get; set; } = true;
+
+    /// <summary>
+    /// Also favorite a hearted outside song or album in Navidrome once it downloads, for the
+    /// person who hearted it (default: false). Off, a heart on a song you do not have only
+    /// downloads it; heart it again once it is in the library to make it a favorite. A heart on
+    /// a song you already have is always a favorite, whatever this says.
+    /// Environment variable: STAR_DOWNLOADS_FOR_REQUESTER
+    /// Octo's own apps are left out: their star is the Add button. The person's sign-in is held
+    /// in memory until the song arrives, and a restart drops it.
+    /// </summary>
+    public bool StarDownloadsForRequester { get; set; } = false;
+
+    /// <summary>
+    /// Never download a song already in the library (default: true). A heart, an album walk or a
+    /// play of a song you have keeps your copy; a lossy copy is queued for a higher quality one
+    /// when a lossless source is in the chain and Better quality may run. The same song means the
+    /// same artist and title in one version, and a length within 8 seconds or the same album.
+    /// Environment variable: SKIP_OWNED_SONGS
+    /// </summary>
+    public bool SkipOwnedSongs { get; set; } = true;
 
     /// <summary>
     /// In Permanent mode, block the first play until the lossless copy has been fetched
@@ -250,6 +346,30 @@ public class SubsonicSettings
     /// the declared contract exact.
     /// </summary>
     public int LosslessWaitTimeoutSeconds { get; set; } = 0;
+
+    /// <summary>
+    /// Keep a copy of every external track that is played, not only of hearted ones
+    /// (default: false).
+    /// Environment variable: DOWNLOAD_ON_PLAY
+    ///
+    /// The copy comes from the first source with song hearts enabled in the heart download
+    /// priority that Octo downloads from itself (Soulseek, YouTube; Lidarr is skipped, see
+    /// LidarrAlbumOnPlay). Playback still starts from the YouTube stream. Only a play from
+    /// the first byte counts, not a seek. Hearts always go first: at most one played track
+    /// waits to download, and one played while another waits is skipped until it is played
+    /// again.
+    /// </summary>
+    public bool DownloadOnPlay { get; set; } = false;
+
+    /// <summary>
+    /// Hand the album of every played external track to Lidarr (default: false).
+    /// Environment variable: LIDARR_ALBUM_ON_PLAY
+    ///
+    /// Works like a Lidarr song heart, once per track and run. Every hand-off makes Lidarr
+    /// search all its indexers, and radio pulls in an album per played track. A hand-off
+    /// Lidarr turns down is tried again on the next play.
+    /// </summary>
+    public bool LidarrAlbumOnPlay { get; set; } = false;
 
     /// <summary>
     /// Folder structure for downloaded tracks (default: Flat)

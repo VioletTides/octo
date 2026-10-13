@@ -1,4 +1,6 @@
+using Microsoft.Extensions.Options;
 using Octo.Models.Domain;
+using Octo.Models.Settings;
 using Octo.Services.LastFm;
 
 namespace Octo.Services.Common;
@@ -33,6 +35,10 @@ public sealed class ExternalSearchService
     /// </summary>
     public const int BuildSize = 60;
 
+    // track.search returns at most 50 rows, so padding whenever the list was short of
+    // BuildSize made the second, sequential Last.fm call on every search.
+    private const int ThinSearchThreshold = 20;
+
     /// <summary>
     /// Deadline for one build. Last.fm has no configured HTTP timeout of its own, so
     /// without this a single hung call would pin the query for every joined caller.
@@ -53,16 +59,19 @@ public sealed class ExternalSearchService
     private readonly SupersedableBuildCoordinator<List<Album>> _albumBuilds = new();
     private readonly IMusicMetadataService _metadata;
     private readonly LastFmService? _lastFm;
+    private readonly IOptionsMonitor<SubsonicSettings>? _subsonic;
     private readonly ILogger<ExternalSearchService> _logger;
 
     public ExternalSearchService(
         IMusicMetadataService metadata,
         ILogger<ExternalSearchService> logger,
-        LastFmService? lastFm = null)
+        LastFmService? lastFm = null,
+        IOptionsMonitor<SubsonicSettings>? subsonic = null)
     {
         _metadata = metadata;
         _logger = logger;
         _lastFm = lastFm;
+        _subsonic = subsonic;
     }
 
     /// <summary>
@@ -113,22 +122,25 @@ public sealed class ExternalSearchService
     ///   1. track.search hits (best fuzzy matches for the query as typed)
     ///   2. canonical artist's top tracks (in case (1) was thin — common for
     ///      single-word artist queries)
-    /// Deduped by artist+title so the same track cannot appear twice.
+    /// Deduped by SongIdentity.MatchKey, so the same track cannot appear twice however its
+    /// artist and title are written.
     /// </summary>
     private async Task<List<Song>> BuildAsync(string query, CancellationToken ct)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var collected = new List<(string Artist, string Title)>();
 
-        var tracks = await _lastFm!.SearchTracksAsync(query, Math.Min(50, BuildSize * 2));
+        // Last.fm's search carries rows from mislabelled scrobbles; put their names right first,
+        // or they reach the results, the player and each listener's Last.fm as they are.
+        var tracks = LastFmSearchCleanup.Clean(await _lastFm!.SearchTracksAsync(query, Math.Min(50, BuildSize * 2)));
         foreach (var t in tracks)
         {
-            var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
+            var key = SongIdentity.MatchKey(t.Artist, t.Title);
             if (seen.Add(key)) collected.Add((t.Artist, t.Title));
             if (collected.Count >= BuildSize) break;
         }
 
-        if (collected.Count < BuildSize)
+        if (collected.Count < ThinSearchThreshold)
         {
             // Use the first track-search hit's artist as the canonical anchor
             // for top-tracks padding. Falls back to the raw query string when
@@ -137,7 +149,7 @@ public sealed class ExternalSearchService
             var topTracks = await _lastFm.GetArtistTopTracksAsync(anchor, BuildSize * 2);
             foreach (var t in topTracks)
             {
-                var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
+                var key = SongIdentity.MatchKey(t.Artist, t.Title);
                 if (seen.Add(key)) collected.Add((t.Artist, t.Title));
                 if (collected.Count >= BuildSize) break;
             }
@@ -155,7 +167,8 @@ public sealed class ExternalSearchService
         // list from the real YouTube video (so the scrub bar matches the audio and the
         // client advances correctly). Bounded + cached.
         await _metadata.EnrichExternalSongsAsync(songs, ct);
-        await _metadata.ResolveTopDurationsAsync(songs, ct);
+        var waitForDurations = _subsonic?.CurrentValue.WaitForSearchDurations ?? true;
+        if (waitForDurations) await _metadata.ResolveTopDurationsAsync(songs, ct);
 
         // Fire-and-forget: pre-resolve YouTube videoIds for the top hits so the first
         // /rest/stream click doesn't pay the cold yt-dlp double-call cost (ytsearch1: + -g,
@@ -168,7 +181,9 @@ public sealed class ExternalSearchService
         // a different one using the Deezer duration — so for the top rows the two raced and
         // the loser could leave a song advertising the length of a video that would not be
         // the one played.
-        _ = _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
+        _ = waitForDurations
+            ? _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12)
+            : Task.Run(() => ResolveDurationsThenPrewarmAsync(songs));
 
         // Same reasoning, for cover art: a client renders the first screen of results a
         // moment after this returns, and without a prewarm each row's getCoverArt call
@@ -177,5 +192,24 @@ public sealed class ExternalSearchService
         _ = _metadata.PrewarmCoverArtAsync(songs, topN: 24);
 
         return songs;
+    }
+
+    /// <summary>
+    /// The durations pass search did not wait for, then the videoId prewarm, in that order
+    /// for the reason given in BuildAsync. It runs in background mode, so the songs this
+    /// build returned stay frozen.
+    /// </summary>
+    private async Task ResolveDurationsThenPrewarmAsync(List<Song> songs)
+    {
+        try
+        {
+            await _metadata.ResolveTopDurationsAsync(songs, CancellationToken.None, background: true);
+            await _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
+        }
+        catch (Exception ex)
+        {
+            // Nothing awaits this, so an exception would only surface as an unobserved task.
+            _logger.LogDebug(ex, "Background duration pass failed for {Count} songs", songs.Count);
+        }
     }
 }

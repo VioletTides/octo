@@ -6,6 +6,7 @@ using Octo.Models.Download;
 using Octo.Models.Search;
 using Octo.Models.Subsonic;
 using Octo.Services;
+using Octo.Services.Common;
 using Octo.Services.Soulseek;
 using Octo.Services.Subsonic;
 
@@ -92,7 +93,11 @@ public class LocalLibraryService : ILocalLibraryService
                 Title = song.Title,
                 Artist = song.Artist,
                 Album = song.Album,
-                DownloadedAt = DateTime.UtcNow
+                DownloadedAt = DateTime.UtcNow,
+                SourcePeer = song.SourcePeer,
+                SourceFile = song.SourceFile,
+                TranscodedFrom = song.TranscodedFrom,
+                MusicBrainzRecordingId = song.MusicBrainzRecordingId,
             };
             
             await SaveMappingsAsync(mappings);
@@ -202,6 +207,92 @@ public class LocalLibraryService : ILocalLibraryService
 
     public string GetDownloadDirectory() => _downloadDirectory;
 
+    /// <summary>
+    /// Drop the mapping for a path Octo no longer owns.
+    ///
+    /// Without this, DownloadSongInternalAsync's existing-file short-circuit keeps pointing a
+    /// re-acquire at the file that was just quarantined, and the replacement never happens.
+    /// </summary>
+    public async Task<IReadOnlyList<LocalSongMapping>> ForgetMappingAsync(string localPath)
+    {
+        if (string.IsNullOrWhiteSpace(localPath)) return [];
+
+        var mappings = await LoadMappingsAsync();
+        await _lock.WaitAsync();
+        try
+        {
+            // By the whole path, so "Artist/Album/Song.flac" and "Artist\Album\Song.flac" are one file.
+            var wanted = FullPathOrSelf(localPath);
+            var stale = mappings
+                .Where(pair => string.Equals(FullPathOrSelf(pair.Value.LocalPath), wanted, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (stale.Count == 0) return [];
+
+            foreach (var (key, _) in stale) mappings.Remove(key);
+            await SaveMappingsAsync(mappings);
+            return stale.Select(pair => pair.Value).ToList();
+        }
+        finally { _lock.Release(); }
+    }
+
+    private static string FullPathOrSelf(string path)
+    {
+        try { return Path.GetFullPath(path); }
+        catch (Exception) { return path; }
+    }
+
+    public async Task RestoreMappingsAsync(IReadOnlyList<LocalSongMapping> mappings, string localPath)
+    {
+        if (mappings.Count == 0 || string.IsNullOrWhiteSpace(localPath)) return;
+
+        var current = await LoadMappingsAsync();
+        await _lock.WaitAsync();
+        try
+        {
+            var added = 0;
+            foreach (var mapping in mappings)
+            {
+                if (string.IsNullOrEmpty(mapping.ExternalProvider) || string.IsNullOrEmpty(mapping.ExternalId)) continue;
+                var key = $"{mapping.ExternalProvider}:{mapping.ExternalId}";
+                // Downloaded again while this one was in the trash: that copy is the song's now.
+                if (current.TryGetValue(key, out var newer) && File.Exists(newer.LocalPath)) continue;
+                mapping.LocalPath = localPath;
+                current[key] = mapping;
+                added++;
+            }
+            if (added > 0) await SaveMappingsAsync(current);
+        }
+        finally { _lock.Release(); }
+    }
+
+    public async Task<LocalSongMapping?> FindMappingByTagsAsync(string? artist, string? title, string? album)
+    {
+        if (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title)) return null;
+
+        var mappings = await LoadMappingsAsync();
+        // One song in one version, however its tags write the artist and title.
+        var wanted = SongIdentity.MatchKey(artist, title);
+        var matches = mappings.Values
+            .Where(mapping =>
+                SongIdentity.MatchKey(mapping.Artist, mapping.Title) == wanted
+                // Album only narrows when both sides have one; a mapping written before album
+                // enrichment should not be excluded for lacking it.
+                && (string.IsNullOrWhiteSpace(album) || string.IsNullOrWhiteSpace(mapping.Album)
+                    || SongIdentity.Key(mapping.Album) == SongIdentity.Key(album))
+                && !string.IsNullOrEmpty(mapping.LocalPath)
+                && File.Exists(mapping.LocalPath))
+            .Take(2)
+            .ToList();
+
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    public async Task<IReadOnlyList<LocalSongMapping>> GetMappingsAsync()
+    {
+        var mappings = await LoadMappingsAsync();
+        return mappings.Values.ToList();
+    }
+
     public async Task<bool> TriggerLibraryScanAsync(bool force = false)
     {
         // Debounce: avoid triggering too many successive scans. A forced call skips it —
@@ -258,9 +349,13 @@ public class LocalLibraryService : ILocalLibraryService
     {
         try
         {
-            // Note: This endpoint works without authentication on most Subsonic/Navidrome servers
-            // when called from localhost.
-            var url = $"{_subsonicSettings.Url}/rest/getScanStatus?f=json";
+            // Navidrome answers getScanStatus only with a sign-in, so it gets the same admin
+            // identity startScan uses.
+            var auth = _navIdentity.GetScanAuth();
+            var url = auth is { } a
+                ? $"{_subsonicSettings.Url}/rest/getScanStatus?f=json&c=octo&v=1.16.1" +
+                  $"&u={Uri.EscapeDataString(a.user)}&t={a.token}&s={a.salt}"
+                : $"{_subsonicSettings.Url}/rest/getScanStatus?f=json";
             
             var response = await _httpClient.GetAsync(url);
             
@@ -275,14 +370,14 @@ public class LocalLibraryService : ILocalLibraryService
                     return new ScanStatus
                     {
                         Scanning = scanStatus.TryGetProperty("scanning", out var scanning) && scanning.GetBoolean(),
-                        Count = scanStatus.TryGetProperty("count", out var count) ? count.GetInt32() : null
+                        Count = scanStatus.TryGetProperty("count", out var count) && count.TryGetInt32(out var n) ? n : null
                     };
                 }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error getting Subsonic scan status");
+            _logger.LogDebug(ex, "Error getting Subsonic scan status");
         }
         
         return null;
@@ -302,4 +397,19 @@ public class LocalSongMapping
     public string Artist { get; set; } = string.Empty;
     public string Album { get; set; } = string.Empty;
     public DateTime DownloadedAt { get; set; }
+
+    /// <summary>Who delivered this file, when it came from Soulseek. Optional, so mappings
+    /// written before this existed still load.</summary>
+    public string? SourcePeer { get; set; }
+    public string? SourceFile { get; set; }
+
+    /// <summary>The MusicBrainz recording a fingerprint confirmed this file is. Optional, like
+    /// SourcePeer; it is what lets a later download of the same recording replace this file
+    /// rather than sit beside it.</summary>
+    public string? MusicBrainzRecordingId { get; set; }
+
+    /// <summary>What the file was likely made from when its spectrum said it is a lossy file
+    /// converted to lossless ("about 128 kbps MP3"). Optional, like SourcePeer; null for a
+    /// genuine file and for every mapping written before the check existed.</summary>
+    public string? TranscodedFrom { get; set; }
 }

@@ -1,3 +1,4 @@
+using Octo.Models.Settings;
 using IOFile = System.IO.File;
 
 namespace Octo.Services.Common;
@@ -8,6 +9,85 @@ namespace Octo.Services.Common;
 /// </summary>
 public static class PathHelper
 {
+    /// <summary>
+    /// Where a track goes for a given <see cref="FolderStructure"/>.
+    ///
+    /// Every download path routes through here so one setting decides the layout for all
+    /// of them. It used to be decided by a separate switch per source - the Soulseek move,
+    /// the YouTube download and the Lidarr import - and two of those carried a silent
+    /// default branch, so adding a layout would have left them quietly filing into the old
+    /// one while only the third obeyed the setting.
+    ///
+    /// The switch is exhaustive on purpose: a new layout should fail to compile here rather
+    /// than resolve to whatever the default arm happened to be.
+    /// </summary>
+    public static string BuildLayoutPath(FolderStructure structure, string downloadPath,
+        string artist, string album, string title, int? trackNumber, string extension)
+    {
+        var safeArtist = SanitizeFolderName(artist);
+        var safeTitle = SanitizeFileName(title);
+
+        // A track with no album falls back to its own title as the folder. Before albums
+        // existed the Organized layout always used the TRACK title, scattering an album's
+        // tracks into a folder each; the routing carries the album now, and this keeps that
+        // old shape only for a track that genuinely has none. The rule lives here so every
+        // caller gets it instead of each one remembering to apply it.
+        var effectiveAlbum = string.IsNullOrWhiteSpace(album) ? title : album;
+
+        return structure switch
+        {
+            FolderStructure.Flat =>
+                Path.Combine(downloadPath, $"{safeArtist} - {safeTitle}{extension}"),
+
+            // No album folder: the album stays in the tags, which is what the server reads.
+            FolderStructure.ByArtist =>
+                Path.Combine(downloadPath, safeArtist, $"{safeTitle}{extension}"),
+
+            FolderStructure.Organized =>
+                BuildTrackPath(downloadPath, artist, effectiveAlbum, title, trackNumber, extension),
+
+            _ => throw new ArgumentOutOfRangeException(nameof(structure), structure,
+                "Unhandled folder layout."),
+        };
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex Annotation =
+        new(@"\s*[\(\[]([^\)\]]*)[\)\]]", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>Words that only ever describe how a video was uploaded, never which recording it is.</summary>
+    private static readonly HashSet<string> UploadNoise = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "official", "music", "video", "audio", "lyric", "lyrics", "visualizer", "visualiser",
+        "hd", "hq", "4k", "8k", "1080p", "720p", "480p", "mv", "m/v", "clip", "videoclip",
+    };
+
+    /// <summary>
+    /// A title as a file name. Drops a leading "Artist - " and any bracket that is nothing but
+    /// upload noise ("(Official Video)", "[HD]"), and keeps every other annotation, because
+    /// "(Live)", "[Remix]" and "(feat. X)" each name a different recording.
+    ///
+    /// Naming used to strip EVERY bracket, so "Song (Live)" and "Song" landed on one path and
+    /// the second download deleted the first: the silent collapse of versions a library must
+    /// never suffer (#53).
+    /// </summary>
+    public static string FileTitle(string title, string artist)
+    {
+        var t = (title ?? "").Trim();
+        if (t.Length == 0) return t;
+        var a = (artist ?? "").Trim();
+        if (a.Length > 0 && t.StartsWith(a + " - ", StringComparison.OrdinalIgnoreCase))
+            t = t[(a.Length + 3)..].Trim();
+
+        var kept = Annotation.Replace(t, match =>
+        {
+            var words = match.Groups[1].Value.Split([' ', '-', '_'], StringSplitOptions.RemoveEmptyEntries);
+            return words.Length > 0 && words.All(UploadNoise.Contains) ? "" : match.Value;
+        });
+        kept = System.Text.RegularExpressions.Regex.Replace(kept, @"\s+", " ").Trim();
+        // A title that is only noise ("(Official Video)") keeps its original text rather than
+        // becoming an empty file name.
+        return kept.Length == 0 ? t : kept;
+    }
     /// <summary>
     /// Gets the cache directory path for temporary file storage.
     /// Uses system temp directory combined with octo-cache subfolder.

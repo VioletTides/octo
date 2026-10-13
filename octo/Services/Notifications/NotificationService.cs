@@ -177,13 +177,16 @@ public sealed class NotificationService
             NotificationEventType.DownloadFailed => new NotificationMessage(
                 evt.Type,
                 $"Download failed: {track}",
-                evt.Detail ?? "Both sources failed.",
+                evt.Detail ?? "Every enabled source failed.",
                 evt.CoverArtUrl),
 
             NotificationEventType.AlbumCompleted => new NotificationMessage(
                 evt.Type,
-                $"Album complete: {track}",
+                // Sent after every album walk, so it has to say when nothing arrived at all.
+                evt.TrackCount is 0 && evt.FailedCount is > 0 ? $"Album failed: {track}" : $"Album complete: {track}",
                 $"{evt.TrackCount} tracks fetched, {evt.LosslessCount} lossless"
+                    + (evt.KeptCount is int k and > 0 ? $", {k} already yours" : "")
+                    + (evt.UpgradingCount is int u and > 0 ? $", {u} upgrading" : "")
                     + (evt.FailedCount is int f and > 0 ? $", {f} failed" : ""),
                 evt.CoverArtUrl,
                 Description: null,
@@ -219,6 +222,10 @@ public sealed class NotificationService
                 Add("Bitrate", $"≈{b * 8 / dur / 1000:N0} kbps");
         }
         if (evt.Year is int year and > 0) Add("Year", year.ToString());
+        // Last, because on a single-user library it is always the same name and the
+        // fields above are what anyone is actually reading.
+        if (evt.RequestedBy is { Count: > 0 } askers)
+            Add("Requested by", string.Join(", ", askers));
         return fields;
     }
 
@@ -228,6 +235,8 @@ public sealed class NotificationService
             new("Tracks", (evt.TrackCount ?? 0).ToString()),
             new("Lossless", (evt.LosslessCount ?? 0).ToString()),
             new("Failed", (evt.FailedCount ?? 0).ToString()),
+            new("Already yours", (evt.KeptCount ?? 0).ToString()),
+            new("Upgrading", (evt.UpgradingCount ?? 0).ToString()),
         };
 
     internal static string FormatSize(long bytes) =>

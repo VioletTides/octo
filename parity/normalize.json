@@ -1,0 +1,47 @@
+{
+  "ignoreKeys": [],
+  "unorderedKeys": [
+    "roles"
+  ],
+  "rules": [
+    {
+      "name": "static-last-modified-is-build-time",
+      "requests": "*static*/*",
+      "where": "header:last-modified",
+      "regex": "^.*$",
+      "replace": "BUILD-TIME"
+    },
+    {
+      "name": "trash-day-folder",
+      "requests": "*",
+      "where": "body",
+      "regex": "\\.octo-trash/\\d{4}-\\d{2}-\\d{2}/",
+      "replace": ".octo-trash/DAY/",
+      "why": "the trash keeps removed songs under a folder named for the day"
+    },
+    {
+      "name": "run-time-ticks",
+      "requests": "*",
+      "where": "*",
+      "regex": "\\b(?:6387|6388|6389|639\\d|64\\d\\d)\\d{14}\\b",
+      "replace": "600000000000000000",
+      "why": ".NET ticks of a run-time instant (2025 on), as in activity ids, journal keys and state files; replaced by a fixed number so a JSON body stays JSON"
+    },
+    {
+      "name": "playlist-cover-art-hash",
+      "requests": "*",
+      "where": "body",
+      "regex": "(pl-[^\"<>]*?)_[0-9a-f]{16}(?=\")",
+      "replace": "\\1",
+      "why": "Navidrome adds its image hash to a playlist's cover id once it has made the image, sometimes after the corpus reads it"
+    },
+    {
+      "name": "radio-outcome-multipliers",
+      "requests": "15-radio/outcomes-after-*",
+      "where": "body",
+      "regex": "(\"(?:lowest|highest)Multiplier\":\\s*-?\\d+\\.\\d{4})\\d*",
+      "replace": "\\1",
+      "why": "the multipliers fade with the age of each play, to the nanosecond"
+    }
+  ]
+}

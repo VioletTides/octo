@@ -12,7 +12,8 @@ public class DeezerMetadataServiceTests
     /// <summary>Builds a service whose HTTP layer answers from a url-substring to body map.
     /// Any url with no match returns 404, which exercises the best-effort paths.</summary>
     private static DeezerMetadataService BuildService(Dictionary<string, string> routes,
-        string language = "en", List<HttpRequestMessage>? capture = null)
+        string language = "en", List<HttpRequestMessage>? capture = null,
+        ILogger<DeezerMetadataService>? logger = null)
     {
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected()
@@ -40,7 +41,7 @@ public class DeezerMetadataServiceTests
 
         return new DeezerMetadataService(factory.Object,
             TestOptions.Monitor(new MetadataSettings { Language = language }),
-            new Mock<ILogger<DeezerMetadataService>>().Object);
+            logger ?? new Mock<ILogger<DeezerMetadataService>>().Object);
     }
 
     /// <summary>Deezer reports throttling as HTTP 200 with this body, which is the whole
@@ -344,6 +345,33 @@ public class DeezerMetadataServiceTests
         Assert.Equal(1, calls("/album/999"));
     }
 
+    /// <summary>getAlbum lists the songs filed under an album when Deezer answered that it has
+    /// no such album or no tracks for it, never when it failed to answer. So the lookup says
+    /// which, and a cached "no such album" still says so.</summary>
+    [Fact]
+    public async Task LookUpAlbumDetailAsync_SaysWhyThereIsNoDetail()
+    {
+        var svc = BuildSequencedService(new()
+        {
+            ("/album/711108/tracks", new[] { QuotaEnvelope, @"{""data"":[]}", TracksJson(10) }),
+            ("/album/711108", new[] { AlbumDetailJson }),
+            // The tracklist is asked beside the album, and dropped when there is no album.
+            ("/album/999/tracks", new[] { @"{""data"":[]}" }),
+            ("/album/999", new[] { NoDataEnvelope }),
+        }, out var calls);
+
+        Assert.Equal(DeezerMetadataService.AlbumAnswer.Unavailable, (await svc.LookUpAlbumDetailAsync("711108")).Answer);
+        Assert.Equal(DeezerMetadataService.AlbumAnswer.NoTracks, (await svc.LookUpAlbumDetailAsync("711108")).Answer);
+        var found = await svc.LookUpAlbumDetailAsync("711108");
+        Assert.Equal(DeezerMetadataService.AlbumAnswer.Found, found.Answer);
+        Assert.Equal(10, found.Detail!.Tracks.Count);
+
+        Assert.Equal(DeezerMetadataService.AlbumAnswer.NoSuchAlbum, (await svc.LookUpAlbumDetailAsync("999")).Answer);
+        Assert.Equal(DeezerMetadataService.AlbumAnswer.NoSuchAlbum, (await svc.LookUpAlbumDetailAsync("999")).Answer);
+        Assert.Equal(1, calls("/album/999"));
+        Assert.Equal(1, calls("/album/999/tracks"));
+    }
+
     /// <summary>
     /// A throttled album search used to cache an empty list, so external albums silently
     /// stopped appearing in search3 for the life of the process.
@@ -439,5 +467,436 @@ public class DeezerMetadataServiceTests
         var second = await svc.EnrichTrackAsync("Extremoduro", "Golfa");
         Assert.NotNull(second);
         Assert.Equal("Canciones Prohibidas", second!.AlbumTitle);
+    }
+
+    // ---- Plain-query regression (Deezer dropped field-qualified search) ------
+    // Octo used to ask for artist:"X" track:"Y". Deezer now reads that as free text, so
+    // the literal words "artist" and "track" had to appear in the record and nothing ever
+    // matched: every external song lost its album, year and duration and fell back to a
+    // flat 180s, and every download was written with bare tags. These tests assert the
+    // query SHAPE, because the stub routes on path alone and stayed green throughout.
+
+    [Fact]
+    public async Task EnrichTrackAsync_SendsPlainTerms_WithoutFieldQualifiers()
+    {
+        var json = @"{""data"":[{""title"":""Reckoner"",""duration"":290,
+            ""album"":{""id"":1,""title"":""In Rainbows""},""artist"":{""name"":""Radiohead""}}]}";
+        var sent = new List<HttpRequestMessage>();
+        var svc = BuildService(new() { ["/search"] = json }, capture: sent);
+
+        await svc.EnrichTrackAsync("Radiohead", "Reckoner", includeYear: false);
+
+        var query = Uri.UnescapeDataString(sent[0].RequestUri!.Query);
+        Assert.DoesNotContain("artist:", query);
+        Assert.DoesNotContain("track:", query);
+        Assert.Contains("Radiohead Reckoner", query);
+    }
+
+    [Fact]
+    public async Task EnrichTrackFullAsync_SendsPlainTerms_WithoutFieldQualifiers()
+    {
+        var json = @"{""data"":[{""title"":""Teardrop"",""duration"":330,""isrc"":""X"",
+            ""album"":{""id"":1,""title"":""Mezzanine""},""artist"":{""name"":""Massive Attack""}}]}";
+        var sent = new List<HttpRequestMessage>();
+        var svc = BuildService(new() { ["/album/1"] = @"{""id"":1}", ["/search"] = json }, capture: sent);
+
+        await svc.EnrichTrackFullAsync("Massive Attack", "Teardrop");
+
+        var query = Uri.UnescapeDataString(sent[0].RequestUri!.Query);
+        Assert.DoesNotContain("artist:", query);
+        Assert.DoesNotContain("track:", query);
+    }
+
+    /// <summary>
+    /// The search hit names only the main artist and carries no track position, so a
+    /// collaboration was tagged as one artist (#49) and the track number was never written (#48).
+    /// Both come from the track's own record. Shape taken from a live answer, 2026-09-25.
+    /// </summary>
+    [Fact]
+    public async Task EnrichTrackFullAsync_ReadsContributorsAndPositionFromTheTrack()
+    {
+        var search = @"{""data"":[{""id"":2334934765,""title"":""Rauw Alejandro: Bzrp Music Sessions, Vol. 56/66"",
+            ""duration"":210,""album"":{""id"":1,""title"":""Session 56""},""artist"":{""name"":""Bizarrap""}}]}";
+        var track = @"{""id"":2334934765,""track_position"":1,""disk_number"":1,""contributors"":[
+            {""name"":""Bizarrap"",""role"":""Main""},{""name"":""Rauw Alejandro"",""role"":""Main""}]}";
+        var svc = BuildService(new()
+        {
+            ["/track/2334934765"] = track,
+            ["/album/1"] = @"{""id"":1,""nb_tracks"":1}",
+            ["/search"] = search,
+        });
+
+        var meta = await svc.EnrichTrackFullAsync("Bizarrap, Rauw Alejandro", "Rauw Alejandro: Bzrp Music Sessions, Vol. 56/66");
+
+        Assert.NotNull(meta);
+        Assert.Equal("Bizarrap", meta.ArtistName);
+        Assert.Equal(["Bizarrap", "Rauw Alejandro"], meta.Contributors);
+        Assert.Equal(1, meta.TrackNumber);
+        Assert.Equal(1, meta.DiscNumber);
+    }
+
+    /// <summary>
+    /// Deezer reports most compilations as record_type "album" (checked live on three), so the
+    /// album artist is the signal a compilation is recognised by, and it is the album artist
+    /// rather than the track's that belongs in the album-artist tag.
+    /// </summary>
+    [Fact]
+    public async Task EnrichTrackFullAsync_ReadsTheAlbumArtistAndRecordType()
+    {
+        var search = @"{""data"":[{""title"":""Song"",""duration"":200,
+            ""album"":{""id"":5,""title"":""Summer Hits""},""artist"":{""name"":""Artist""}}]}";
+        var album = @"{""id"":5,""record_type"":""album"",""artist"":{""id"":5080,""name"":""Various Artists""}}";
+        var svc = BuildService(new() { ["/album/5"] = album, ["/search"] = search });
+
+        var meta = await svc.EnrichTrackFullAsync("Artist", "Song");
+
+        Assert.NotNull(meta);
+        Assert.Equal("Various Artists", meta.AlbumArtistName);
+        Assert.Equal("album", meta.RecordType);
+        Assert.Equal("Artist", meta.ArtistName);
+    }
+
+    [Fact]
+    public async Task FindAlbumIdAsync_SendsPlainTerms_WithoutFieldQualifiers()
+    {
+        var json = @"{""data"":[{""id"":7,""title"":""Discovery"",""artist"":{""name"":""Daft Punk""}}]}";
+        var sent = new List<HttpRequestMessage>();
+        var svc = BuildService(new() { ["/search/album"] = json }, capture: sent);
+
+        await svc.FindAlbumIdAsync("Daft Punk", "Discovery");
+
+        var query = Uri.UnescapeDataString(sent[0].RequestUri!.Query);
+        Assert.DoesNotContain("artist:", query);
+        Assert.DoesNotContain("album:", query);
+    }
+
+    // ---- The guard that makes a plain query safe --------------------------------
+
+    [Fact]
+    public async Task EnrichTrackAsync_SkipsAHitByAnotherArtist()
+    {
+        // A plain query is fuzzy enough to put a cover at position 0. Taking it would
+        // attach the wrong album and length to the song as fact.
+        var json = @"{""data"":[
+            {""title"":""Creep"",""duration"":120,""album"":{""id"":9,""title"":""Karaoke Hits""},
+             ""artist"":{""name"":""Karaoke All Stars""}},
+            {""title"":""Creep"",""duration"":238,""album"":{""id"":1,""title"":""Pablo Honey""},
+             ""artist"":{""name"":""Radiohead""}}]}";
+        var svc = BuildService(new() { ["/search"] = json });
+
+        var meta = await svc.EnrichTrackAsync("Radiohead", "Creep", includeYear: false);
+
+        Assert.Equal("Pablo Honey", meta!.AlbumTitle);
+        Assert.Equal(238, meta.Duration);
+    }
+
+    [Fact]
+    public async Task EnrichTrackAsync_AcceptsADecoratedTitle()
+    {
+        // Deezer decorates titles; an exact compare would reject the right recording.
+        var json = @"{""data"":[{""title"":""Reckoner (Remastered 2016)"",""duration"":290,
+            ""album"":{""id"":1,""title"":""In Rainbows""},""artist"":{""name"":""Radiohead""}}]}";
+        var svc = BuildService(new() { ["/search"] = json });
+
+        var meta = await svc.EnrichTrackAsync("Radiohead", "Reckoner", includeYear: false);
+
+        Assert.Equal(290, meta!.Duration);
+    }
+
+    [Fact]
+    public async Task EnrichTrackAsync_RejectsAHitThatMatchesNothing()
+    {
+        // A hit stating neither the artist nor the title is not a match by default.
+        var json = @"{""data"":[{""duration"":111,""album"":{""id"":9,""title"":""Something Else""}}]}";
+        var svc = BuildService(new() { ["/search"] = json });
+
+        Assert.Null(await svc.EnrichTrackAsync("Radiohead", "Reckoner", includeYear: false));
+    }
+
+    // ---- A throttled year must not cost the whole track -------------------------
+
+    [Fact]
+    public async Task EnrichTrackAsync_ThrottledYear_KeepsAlbumAndDuration()
+    {
+        // The album detail carries only the year. Returning null when it was throttled
+        // threw away an album title and duration already in hand, which is what left a
+        // song with no length at all.
+        var track = @"{""data"":[{""title"":""Creep"",""duration"":238,
+            ""album"":{""id"":1,""title"":""Pablo Honey""},""artist"":{""name"":""Radiohead""}}]}";
+        var svc = BuildService(new() { ["/album/1"] = QuotaEnvelope, ["/search"] = track });
+
+        var meta = await svc.EnrichTrackAsync("Radiohead", "Creep", includeYear: true);
+
+        Assert.NotNull(meta);
+        Assert.Equal("Pablo Honey", meta!.AlbumTitle);
+        Assert.Equal(238, meta.Duration);
+        Assert.Null(meta.Year);
+    }
+
+    [Fact]
+    public async Task EnrichTrackAsync_ThrottledYear_IsNotCached()
+    {
+        // ...and because the year is still unknown, the answer must not be remembered,
+        // or one throttle blip becomes "this track has no year" for the life of the entry.
+        var svc = BuildSequencedService(new()
+        {
+            ("/album/1", new[] { QuotaEnvelope, @"{""id"":1,""release_date"":""1993-02-22""}" }),
+            ("/search", new[] { @"{""data"":[{""title"":""Creep"",""duration"":238,
+                ""album"":{""id"":1,""title"":""Pablo Honey""},""artist"":{""name"":""Radiohead""}}]}" }),
+        }, out _);
+
+        Assert.Null((await svc.EnrichTrackAsync("Radiohead", "Creep"))!.Year);
+        Assert.Equal(1993, (await svc.EnrichTrackAsync("Radiohead", "Creep"))!.Year);
+    }
+    // ---- External artist search -------------------------------------------------
+    // search3's merge has always known how to fold external artists in, but nothing
+    // populated the list, so the artist column only ever showed the local library.
+
+    [Fact]
+    public async Task SearchArtistsAsync_MapsNameImageAndAlbumCount()
+    {
+        var json = @"{""data"":[
+            {""id"":399,""name"":""Radiohead"",""picture_xl"":""https://cdn/r.jpg"",""nb_album"":24,""nb_fan"":6100000},
+            {""id"":27,""name"":""Daft Punk"",""picture_medium"":""https://cdn/d.jpg"",""nb_album"":11}]}";
+        var svc = BuildService(new() { ["/search/artist"] = json });
+
+        var hits = await svc.SearchArtistsAsync("radiohead", 10);
+
+        Assert.Equal(2, hits.Count);
+        Assert.Equal("399", hits[0].DeezerId);
+        Assert.Equal("Radiohead", hits[0].Name);
+        Assert.Equal("https://cdn/r.jpg", hits[0].PictureUrl);
+        Assert.Equal(24, hits[0].AlbumCount);
+        // What tells two artists of one name apart when nothing better is known.
+        Assert.Equal(6100000, hits[0].Fans);
+        Assert.Equal(0, hits[1].Fans);
+        // Falls back to the medium picture when there is no xl.
+        Assert.Equal("https://cdn/d.jpg", hits[1].PictureUrl);
+    }
+
+    [Fact]
+    public async Task SearchArtistsAsync_Throttled_ReturnsEmptyWithoutCaching()
+    {
+        // Caching an empty list on a refusal is what would make external artists vanish
+        // from search3 for the rest of the process (issue #8's shape).
+        var svc = BuildSequencedService(new()
+        {
+            ("/search/artist", new[] { QuotaEnvelope, @"{""data"":[{""id"":399,""name"":""Radiohead""}]}" }),
+        }, out _);
+
+        Assert.Empty(await svc.SearchArtistsAsync("radiohead", 10));
+        Assert.Single(await svc.SearchArtistsAsync("radiohead", 10));
+    }
+
+    [Fact]
+    public async Task SearchArtistsAsync_SendsPlainQuery()
+    {
+        var sent = new List<HttpRequestMessage>();
+        var svc = BuildService(new() { ["/search/artist"] = @"{""data"":[]}" }, capture: sent);
+
+        await svc.SearchArtistsAsync("radiohead", 10);
+
+        Assert.DoesNotContain("artist:", Uri.UnescapeDataString(sent[0].RequestUri!.Query));
+    }
+
+    [Fact]
+    public async Task GetArtistAlbumsAsync_GroupsAlbumsThenEpsThenSinglesThenCompilations()
+    {
+        // The catalog's own shape for an artist's releases: no artist and no track counts,
+        // a clean and an explicit copy of one album, a single, and a compilation of theirs.
+        var json = @"{""data"":[
+            {""id"":1,""title"":""First"",""record_type"":""album"",""release_date"":""1997-01-20"",""cover_xl"":""https://cdn/1.jpg""},
+            {""id"":2,""title"":""Second"",""record_type"":""album"",""release_date"":""2001-03-12""},
+            {""id"":3,""title"":""Second"",""record_type"":""album"",""release_date"":""2001-03-12""},
+            {""id"":4,""title"":""A Single"",""record_type"":""single"",""release_date"":""2005-01-01""},
+            {""id"":5,""title"":""The Best Of"",""record_type"":""compile"",""release_date"":""2010-06-01""},
+            {""id"":6,""title"":""Live Set"",""record_type"":""ep"",""release_date"":""2003-09-09""}
+        ]}";
+        var svc = BuildService(new() { ["/artist/42/albums"] = json });
+
+        var hits = await svc.GetArtistAlbumsAsync("42", "Test Artist");
+
+        // The way the apps group a discography, newest first within each group.
+        Assert.Equal(new[] { "Second", "First", "Live Set", "A Single", "The Best Of" }, hits.Select(h => h.Title));
+        Assert.Equal(new[] { "album", "album", "ep", "single", "compile" }, hits.Select(h => h.RecordType));
+        Assert.All(hits, h => Assert.Equal("Test Artist", h.Artist));
+        Assert.Equal("2", hits.Single(h => h.Title == "Second").DeezerId);
+        Assert.Equal(1997, hits.Single(h => h.Title == "First").Year);
+        Assert.Equal("https://cdn/1.jpg", hits.Single(h => h.Title == "First").CoverUrl);
+    }
+
+    [Fact]
+    public async Task GetArtistAlbumsAsync_SinglesAreNewestFirstToo()
+    {
+        var json = @"{""data"":[
+            {""id"":1,""title"":""Song A"",""record_type"":""single"",""release_date"":""2020-01-01""},
+            {""id"":2,""title"":""Song B"",""record_type"":""single"",""release_date"":""2022-01-01""}
+        ]}";
+        var svc = BuildService(new() { ["/artist/9/albums"] = json });
+
+        var hits = await svc.GetArtistAlbumsAsync("9", "New Artist");
+
+        Assert.Equal(new[] { "Song B", "Song A" }, hits.Select(h => h.Title));
+    }
+
+    [Fact]
+    public async Task GetArtistAlbumsAsync_ACareerOfSinglesShowsThemAfterItsAlbum()
+    {
+        // Singles used to be hidden whenever there was one album, which hid most of a career
+        // like this one.
+        var json = @"{""data"":[
+            {""id"":1,""title"":""Hit Three"",""record_type"":""single"",""release_date"":""2024-01-01""},
+            {""id"":2,""title"":""Hit Two"",""record_type"":""single"",""release_date"":""2023-01-01""},
+            {""id"":3,""title"":""The Album"",""record_type"":""album"",""release_date"":""2021-01-01""},
+            {""id"":4,""title"":""Hit One"",""record_type"":""single"",""release_date"":""2020-01-01""}
+        ]}";
+        var svc = BuildService(new() { ["/artist/9/albums"] = json });
+
+        var hits = await svc.GetArtistAlbumsAsync("9", "Singles Artist");
+
+        Assert.Equal(new[] { "The Album", "Hit Three", "Hit Two", "Hit One" }, hits.Select(h => h.Title));
+    }
+
+    [Theory]
+    [InlineData("album", "album")]
+    [InlineData("ep", "ep")]
+    [InlineData("single", "single")]
+    [InlineData("compile", "album,compilation")]
+    [InlineData("compilation", "album,compilation")]
+    [InlineData("ALBUM", "album")]
+    [InlineData("mixtape", "")]
+    [InlineData(null, "")]
+    public void ReleaseTypes_AreNavidromesLowercaseWords(string? recordType, string expected)
+        => Assert.Equal(expected, string.Join(",", DeezerMetadataService.ReleaseTypes(recordType)));
+
+    [Theory]
+    [InlineData("album", "ep", "single")]
+    [InlineData("single", "ep", "album")]
+    [InlineData("ep", "album", "single")]
+    public async Task GetArtistAlbumsAsync_OneTitleIsOneRow_TheAlbumKept(string first, string second, string third)
+    {
+        // An album and its own EP or single can share a title. An outside album's id is made
+        // from the artist and title, so both rows would open one release: whichever came last.
+        var json = $@"{{""data"":[
+            {{""id"":1,""title"":""Same Name"",""record_type"":""{first}"",""release_date"":""2020-01-01""}},
+            {{""id"":2,""title"":""Same Name"",""record_type"":""{second}"",""release_date"":""2020-01-01""}},
+            {{""id"":3,""title"":""same name!"",""record_type"":""{third}"",""release_date"":""2019-01-01""}}
+        ]}}";
+        var svc = BuildService(new() { ["/artist/9/albums"] = json });
+
+        var hit = Assert.Single(await svc.GetArtistAlbumsAsync("9", "Some Artist"));
+
+        Assert.Equal("album", hit.RecordType);
+        Assert.Equal(new[] { first, second, third }.ToList().IndexOf("album") + 1, int.Parse(hit.DeezerId));
+    }
+
+    [Fact]
+    public async Task GetArtistAlbumsAsync_SaysSoWhenTheCatalogHasMoreThanTheListing()
+    {
+        var logger = new Mock<ILogger<DeezerMetadataService>>();
+        var json = @"{""total"":250,""data"":[
+            {""id"":1,""title"":""Newest"",""record_type"":""album"",""release_date"":""2024-01-01""}]}";
+        var svc = BuildService(new() { ["/artist/9/albums"] = json }, logger: logger.Object);
+
+        Assert.Single(await svc.GetArtistAlbumsAsync("9", "Long Career"));
+
+        logger.Verify(l => l.Log(LogLevel.Warning, It.IsAny<EventId>(),
+            It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("has 250 releases; the page lists the first 1")),
+            It.IsAny<Exception?>(), It.IsAny<Func<It.IsAnyType, Exception?, string>>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task GetArtistAlbumsAsync_AWholeListingWarnsOfNothing()
+    {
+        var logger = new Mock<ILogger<DeezerMetadataService>>();
+        var json = @"{""total"":1,""data"":[
+            {""id"":1,""title"":""Only"",""record_type"":""album"",""release_date"":""2024-01-01""}]}";
+        var svc = BuildService(new() { ["/artist/9/albums"] = json }, logger: logger.Object);
+
+        await svc.GetArtistAlbumsAsync("9", "Short Career");
+
+        logger.Verify(l => l.Log(LogLevel.Warning, It.IsAny<EventId>(), It.IsAny<It.IsAnyType>(),
+            It.IsAny<Exception?>(), It.IsAny<Func<It.IsAnyType, Exception?, string>>()), Times.Never);
+    }
+
+    // ---- Ranked candidates for the release chooser ----------------------------------------
+
+    private const string TwoHitSearch = @"{""data"":[
+        {""id"":11,""title"":""Teardrop"",""duration"":330,""isrc"":""GBAAA9800001"",""explicit_lyrics"":false,
+         ""album"":{""id"":1,""title"":""Mezzanine"",""cover_xl"":""https://cdn/mezz.jpg""},""artist"":{""name"":""Massive Attack""}},
+        {""id"":22,""title"":""Teardrop"",""duration"":330,""isrc"":""GBAAA9800001"",
+         ""album"":{""id"":2,""title"":""Collected"",""cover_xl"":""https://cdn/col.jpg""},""artist"":{""name"":""Massive Attack""}},
+        {""id"":33,""title"":""Teardrop (Live)"",""duration"":340,
+         ""album"":{""id"":3,""title"":""Live at Wembley""},""artist"":{""name"":""Massive Attack""}}
+    ]}";
+
+    [Fact]
+    public async Task EnrichTrackCandidatesAsync_DetailFetchesTheBestTwo_AndReadsTheNewFields()
+    {
+        var sent = new List<HttpRequestMessage>();
+        var svc = BuildService(new()
+        {
+            ["/album/1"] = @"{""id"":1,""record_type"":""album"",""upc"":""724384559922"",""label"":""Virgin"",""release_date"":""1998-04-20"",""nb_tracks"":11,""artist"":{""name"":""Massive Attack""}}",
+            ["/album/2"] = @"{""id"":2,""record_type"":""compile"",""upc"":""094636482323"",""release_date"":""2006-03-27"",""artist"":{""name"":""Massive Attack""}}",
+            ["/album/3"] = @"{""id"":3,""record_type"":""album""}",
+            ["/track/11"] = @"{""id"":11,""track_position"":3,""disk_number"":1,""gain"":-9.8,""explicit_lyrics"":false,""contributors"":[{""name"":""Massive Attack"",""role"":""Main""},{""name"":""Elizabeth Fraser"",""role"":""Featured""}]}",
+            ["/track/22"] = @"{""id"":22,""track_position"":7,""disk_number"":1}",
+            ["/search"] = TwoHitSearch,
+        }, capture: sent);
+
+        var answer = await svc.EnrichTrackCandidatesAsync("Massive Attack", "Teardrop", max: 2);
+
+        Assert.False(answer.DidNotAnswer);
+        Assert.Equal(2, answer.Hits.Count);
+        var mezzanine = answer.Hits[0];
+        Assert.Equal("Teardrop", mezzanine.Title);
+        Assert.Equal("11", mezzanine.TrackId);
+        Assert.Equal("1", mezzanine.AlbumId);
+        Assert.Equal("724384559922", mezzanine.Barcode);
+        Assert.Equal(false, mezzanine.ExplicitLyrics);
+        Assert.Equal(-9.8, mezzanine.CatalogGain);
+        Assert.Equal("album", mezzanine.RecordType);
+        Assert.Equal(["Massive Attack", "Elizabeth Fraser"], mezzanine.Contributors);
+        Assert.Equal("compile", answer.Hits[1].RecordType);
+        // The live take contradicts the title, so it is never a hit, and the best two cost two album details.
+        Assert.Equal(2, sent.Count(r => r.RequestUri!.AbsolutePath.StartsWith("/album/")));
+        Assert.DoesNotContain(sent, r => r.RequestUri!.AbsolutePath == "/album/3");
+    }
+
+    [Fact]
+    public async Task EnrichTrackCandidatesAsync_OneHit_CostsOneAlbumDetail_AndIsRemembered()
+    {
+        var sent = new List<HttpRequestMessage>();
+        var one = @"{""data"":[{""id"":11,""title"":""Teardrop"",""duration"":330,""album"":{""id"":1,""title"":""Mezzanine""},""artist"":{""name"":""Massive Attack""}}]}";
+        var svc = BuildService(new() { ["/album/1"] = @"{""id"":1,""record_type"":""album""}", ["/track/11"] = @"{""id"":11}", ["/search"] = one }, capture: sent);
+
+        var first = await svc.EnrichTrackCandidatesAsync("Massive Attack", "Teardrop", max: 2);
+        var second = await svc.EnrichTrackCandidatesAsync("Massive Attack", "Teardrop", max: 2);
+
+        Assert.Single(first.Hits);
+        Assert.Same(first, second);
+        Assert.Equal(1, sent.Count(r => r.RequestUri!.AbsolutePath.StartsWith("/album/")));
+    }
+
+    /// <summary>A throttled catalog gives no candidate, says so, and leaves nothing in the cache
+    /// to repeat the throttle for the next twelve hours.</summary>
+    [Fact]
+    public async Task EnrichTrackCandidatesAsync_Throttled_AnswersNothingAndRemembersNothing()
+    {
+        var svc = BuildSequencedService(new()
+        {
+            ("/album/1", [@"{""id"":1,""record_type"":""album""}"]),
+            ("/track/11", [@"{""id"":11}"]),
+            ("/search", [QuotaEnvelope, @"{""data"":[{""id"":11,""title"":""Teardrop"",""duration"":330,""album"":{""id"":1,""title"":""Mezzanine""},""artist"":{""name"":""Massive Attack""}}]}"]),
+        }, out var calls);
+
+        var throttled = await svc.EnrichTrackCandidatesAsync("Massive Attack", "Teardrop");
+        var later = await svc.EnrichTrackCandidatesAsync("Massive Attack", "Teardrop");
+
+        Assert.True(throttled.DidNotAnswer);
+        Assert.Empty(throttled.Hits);
+        Assert.False(later.DidNotAnswer);
+        Assert.Single(later.Hits);
+        Assert.Equal(2, calls("/search"));
     }
 }

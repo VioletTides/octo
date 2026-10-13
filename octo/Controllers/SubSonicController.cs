@@ -15,6 +15,7 @@ using Octo.Services.Common;
 using Octo.Services.Local;
 using Octo.Services.Subsonic;
 using Octo.Services.LastFm;
+using Octo.Services.Radio;
 using Octo.Services.CoverArt;
 using Octo.Services.Soulseek;
 
@@ -22,7 +23,7 @@ namespace Octo.Controllers;
 
 [ApiController]
 [Route("")]
-public class SubsonicController : ControllerBase
+public partial class SubsonicController : ControllerBase
 {
     // IOptionsMonitor, not IOptions: the admin UI writes settings.json and the
     // config provider reloads it, but IOptions.Value is resolved once and this is a
@@ -41,9 +42,18 @@ public class SubsonicController : ControllerBase
     private readonly PlaylistSyncService? _playlistSyncService;
     private readonly LastFmService? _lastFmService;
     private readonly LastFmRadioTrackResolver _radioTrackResolver;
+    private readonly Octo.Services.Radio.SongRadioService _songRadio;
+    private readonly RadioOutcomeStore? _radioOutcomes;
     private readonly Octo.Services.ListenBrainz.ListenBrainzService? _listenBrainz;
+    private readonly LastFmScrobbleService? _lastFmScrobbles;
     private readonly IOptionsMonitor<LastFmSettings> _lastFmSettingsOptions;
     private LastFmSettings _lastFmSettings => _lastFmSettingsOptions.CurrentValue;
+    private readonly IOptionsMonitor<LibraryActionSettings> _libraryActionSettings;
+
+    /// <summary>Optional so the controller still resolves where the library-action workers are
+    /// not registered. Null means a rating simply never triggers anything.</summary>
+    private readonly Octo.Services.Library.LibraryActionRatingWorker? _ratingActions;
+    private readonly Octo.Services.Library.LibraryActionPlaylistProvisioner? _actionPlaylists;
     private readonly CoverArtService? _coverArtService;
     private readonly CoverArtAggregator? _coverArtAggregator;
     private readonly ExternalIdRegistry _idRegistry;
@@ -57,6 +67,31 @@ public class SubsonicController : ControllerBase
     private readonly LastFmRadioRefreshQueue? _radioRefreshQueue;
     private readonly LastFmRadioStreamSessionStore _radioStreamSessions;
     private readonly LastFmRadioStreamService _radioStreams;
+    private readonly SyncCatalogService? _syncCatalog;
+    private readonly Octo.Services.Lyrics.LyricsService? _lyricsService;
+    private readonly IOptionsMonitor<MetadataSettings>? _metadataSettings;
+    private readonly Octo.Services.Library.NoticeQueue? _noticeQueue;
+    private readonly Octo.Services.Library.GeneratedPlaylistService? _generatedPlaylists;
+    private readonly IOptionsMonitor<GeneratedPlaylistSettings>? _generatedSettings;
+    private readonly AcquisitionTracker? _acquisitionTracker;
+    private readonly Octo.Services.Lyrics.LyricsChoiceService? _lyricsChoices;
+    private readonly Octo.Services.Library.LibraryActionExecutor? _libraryActions;
+    private readonly Octo.Services.Library.UpgradeQueue? _upgradeQueue;
+    private readonly DownloadConcurrency? _downloadConcurrency;
+    private readonly IOptionsMonitor<SoulseekSettings>? _soulseekSettings;
+    private readonly Octo.Services.Library.UpgradeSources? _upgradeSources;
+
+    /// <summary>Whether a source Better quality searches (Soulseek, Lidarr) is set up here at all.</summary>
+    private bool UpgradeReady => _upgradeSources?.Ready
+        ?? (_soulseekSettings is null || Octo.Services.Library.UpgradeSources.SoulseekSetUp(_soulseekSettings.CurrentValue));
+
+    /// <summary>Where Better quality looks, in words: "Soulseek", "Lidarr", or "Soulseek or Lidarr".</summary>
+    private string UpgradeSourceName => _upgradeSources?.Name ?? "Soulseek";
+    private readonly SearchSongOrderCache _searchSongOrders;
+    private readonly RequestIdentity _requestIdentity;
+    private readonly RecentScrobbles _recentScrobbles;
+    private readonly CredentialCheck _credentialCheck;
+    private readonly StarOnArrival? _starOnArrival;
 
     public SubsonicController(
         IOptionsMonitor<SubsonicSettings> subsonicSettings,
@@ -74,19 +109,63 @@ public class SubsonicController : ControllerBase
         RadioQueueStore radioQueueStore,
         NavidromeIdentityService navIdentity,
         LastFmRadioTrackResolver radioTrackResolver,
+        Octo.Services.Radio.SongRadioService songRadio,
+        RadioOutcomeStore radioOutcomes,
         ILogger<SubsonicController> logger,
         IOptionsMonitor<LastFmSettings> lastFmSettings,
         LastFmRadioStreamSessionStore radioStreamSessions,
         LastFmRadioStreamService radioStreams,
+        IOptionsMonitor<LibraryActionSettings> libraryActionSettings,
         PlaylistSyncService? playlistSyncService = null,
+        Octo.Services.Library.LibraryActionRatingWorker? ratingActions = null,
+        Octo.Services.Library.LibraryActionPlaylistProvisioner? actionPlaylists = null,
         LastFmService? lastFmService = null,
         CoverArtService? coverArtService = null,
         CoverArtAggregator? coverArtAggregator = null,
         LastFmRadioStateStore? radioStateStore = null,
         LastFmRadioRefreshQueue? radioRefreshQueue = null,
-        Octo.Services.ListenBrainz.ListenBrainzService? listenBrainz = null)
+        Octo.Services.ListenBrainz.ListenBrainzService? listenBrainz = null,
+        SyncCatalogService? syncCatalog = null,
+        Octo.Services.Lyrics.LyricsService? lyricsService = null,
+        IOptionsMonitor<MetadataSettings>? metadataSettings = null,
+        Octo.Services.Library.NoticeQueue? noticeQueue = null,
+        Octo.Services.Library.GeneratedPlaylistService? generatedPlaylists = null,
+        IOptionsMonitor<GeneratedPlaylistSettings>? generatedSettings = null,
+        AcquisitionTracker? acquisitionTracker = null,
+        Octo.Services.Lyrics.LyricsChoiceService? lyricsChoices = null,
+        Octo.Services.Library.LibraryActionExecutor? libraryActions = null,
+        SearchSongOrderCache? searchSongOrders = null,
+        LastFmScrobbleService? lastFmScrobbles = null,
+        RequestIdentity? requestIdentity = null,
+        RecentScrobbles? recentScrobbles = null, CredentialCheck? credentialCheck = null,
+        StarOnArrival? starOnArrival = null,
+        Octo.Services.Library.UpgradeQueue? upgradeQueue = null,
+        DownloadConcurrency? downloadConcurrency = null,
+        IOptionsMonitor<SoulseekSettings>? soulseekSettings = null,
+        Octo.Services.Library.UpgradeSources? upgradeSources = null)
     {
+        _soulseekSettings = soulseekSettings;
+        _upgradeSources = upgradeSources;
+        _upgradeQueue = upgradeQueue;
+        _downloadConcurrency = downloadConcurrency;
+        _starOnArrival = starOnArrival;
+        _recentScrobbles = recentScrobbles ?? new RecentScrobbles();
+        _lastFmScrobbles = lastFmScrobbles;
+        _requestIdentity = requestIdentity
+            ?? new RequestIdentity(Microsoft.Extensions.Logging.Abstractions.NullLogger<RequestIdentity>.Instance);
+        _credentialCheck = credentialCheck
+            ?? new CredentialCheck(Microsoft.Extensions.Logging.Abstractions.NullLogger<CredentialCheck>.Instance);
+        _libraryActions = libraryActions;
+        _searchSongOrders = searchSongOrders ?? new SearchSongOrderCache();
+        _acquisitionTracker = acquisitionTracker;
+        _lyricsChoices = lyricsChoices;
+        _generatedPlaylists = generatedPlaylists;
+        _generatedSettings = generatedSettings;
         _listenBrainz = listenBrainz;
+        _syncCatalog = syncCatalog;
+        _lyricsService = lyricsService;
+        _metadataSettings = metadataSettings;
+        _noticeQueue = noticeQueue;
         subsonicSettingsOptions = subsonicSettings;
         _metadataService = metadataService;
         _localLibraryService = localLibraryService;
@@ -102,9 +181,14 @@ public class SubsonicController : ControllerBase
         _radioQueueStore = radioQueueStore;
         _navIdentity = navIdentity;
         _radioTrackResolver = radioTrackResolver;
+        _songRadio = songRadio;
+        _radioOutcomes = radioOutcomes;
         _playlistSyncService = playlistSyncService;
         _lastFmService = lastFmService;
         _lastFmSettingsOptions = lastFmSettings;
+        _libraryActionSettings = libraryActionSettings;
+        _ratingActions = ratingActions;
+        _actionPlaylists = actionPlaylists;
         _coverArtService = coverArtService;
         _coverArtAggregator = coverArtAggregator;
         _logger = logger;
@@ -289,10 +373,24 @@ public class SubsonicController : ControllerBase
                 : _responseBuilder.CreateError(format, 0, "Unable to authenticate with Navidrome");
 
         var username = parameters.GetValueOrDefault("u", "");
+
+        // Navidrome answered ok above, so `u` is authenticated. Ensure this user's action
+        // playlists exist, using the body we already have so the common case costs no extra
+        // request. Fire-and-forget: creating a playlist must never delay the listing.
+        if (_actionPlaylists is not null)
+            _ = _actionPlaylists.EnsureAsync(username, PlaylistNames(relay.Body, format), parameters);
+
         await BootstrapRadioProfileAsync(username, parameters);
         var stations = PlaylistStations(username);
         QueueRefreshIfStale(username);
-        if (stations.Count == 0) return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        var mixSettings = _generatedSettings?.CurrentValue;
+        // The mixes, and Made for you, which is on by default whatever the mixes switch says.
+        var generated = _generatedPlaylists is not null && mixSettings is not null && (mixSettings.Enabled || mixSettings.AnyForYou)
+            ? await _generatedPlaylists.ListAsync(username, parameters)
+            : [];
+        var popular = Popular() is { } popularLists ? await popularLists.ListAsync(username, parameters) : null;
+        if (stations.Count == 0 && generated.Count == 0 && popular is null)
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
         try
         {
             if (format.Equals("json", StringComparison.OrdinalIgnoreCase))
@@ -305,6 +403,10 @@ public class SubsonicController : ControllerBase
                 playlists["playlist"] = rows;
                 foreach (var station in stations)
                     rows.Add(JsonSerializer.SerializeToNode(_responseBuilder.RadioPlaylistFields(station)));
+                if (popular is not null)
+                    rows.Add(JsonSerializer.SerializeToNode(_responseBuilder.PopularPlaylistFields(popular)));
+                foreach (var mix in generated)
+                    rows.Add(JsonSerializer.SerializeToNode(_responseBuilder.GeneratedPlaylistFields(mix, mixSettings!)));
                 return File(Encoding.UTF8.GetBytes(root.ToJsonString()), "application/json");
             }
             var document = XDocument.Parse(Encoding.UTF8.GetString(relay.Body));
@@ -316,11 +418,19 @@ public class SubsonicController : ControllerBase
                 playlistsElement.Add(new XElement(ns + "playlist",
                     _responseBuilder.RadioPlaylistFields(station).Select(pair =>
                         new XAttribute(pair.Key, XmlValue(pair.Value)))));
+            if (popular is not null)
+                playlistsElement.Add(new XElement(ns + "playlist",
+                    _responseBuilder.PopularPlaylistFields(popular).Select(pair =>
+                        new XAttribute(pair.Key, XmlValue(pair.Value)))));
+            foreach (var mix in generated)
+                playlistsElement.Add(new XElement(ns + "playlist",
+                    _responseBuilder.GeneratedPlaylistFields(mix, mixSettings!).Select(pair =>
+                        new XAttribute(pair.Key, XmlValue(pair.Value)))));
             return File(Encoding.UTF8.GetBytes(document.ToString()), "application/xml");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not merge Radio stations into getPlaylists");
+            _logger.LogWarning(ex, "Could not merge Radio stations and mixes into getPlaylists");
             return File(relay.Body, relay.ContentType ?? $"application/{format}");
         }
     }
@@ -334,6 +444,23 @@ public class SubsonicController : ControllerBase
         var format = parameters.GetValueOrDefault("f", "xml");
         var id = parameters.GetValueOrDefault("id", "");
         var username = parameters.GetValueOrDefault("u", "");
+
+        if (Popular() is { } popular && popular.IsTheList(username, id))
+            return await PopularPlaylistAsync(popular, parameters, format, username);
+
+        // A mix is the listener's own library, served as a playlist Navidrome has never heard of.
+        // The ping is the auth check, as for a station: nothing about a user is revealed first.
+        if (_generatedPlaylists?.Find(username, id) is { } mix && _generatedSettings is not null)
+        {
+            var authOnly = parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+            authOnly.Remove("id");
+            var check = await _proxyService.RelaySafeAsync("rest/ping", authOnly);
+            if (!check.Success || check.Body is null || !IsSuccessfulSubsonicResponse(check.Body, format))
+                return _responseBuilder.CreateError(format, 40, "Wrong username or password");
+            var entries = await _generatedPlaylists.MaterializeAsync(username, mix, parameters, HttpContext.RequestAborted);
+            return _responseBuilder.CreateGeneratedPlaylistResponse(format, mix, _generatedSettings.CurrentValue, entries);
+        }
+
         var station = PlaylistStations(username).FirstOrDefault(item => item.Id == id);
         if (station is null)
         {
@@ -349,6 +476,30 @@ public class SubsonicController : ControllerBase
             return _responseBuilder.CreateError(format, 40, "Wrong username or password");
 
         var songs = await MaterializeStationAsync(station, parameters);
+        var suggested = songs.Where(song => song.SuggestedBy is not null).GroupBy(song => song.Id)
+            .ToDictionary(group => group.Key, group => group.First().SuggestedBy!);
+        if (_generatedPlaylists is not null)
+            songs = (await _generatedPlaylists.BlendIntoDiscoveryAsync(username, station, songs, parameters,
+                HttpContext.RequestAborted)).ToList();
+
+        // Before the catalog swap below: these rows are this response's own, while a catalog
+        // row is shared with every other response that serves it.
+        _metadataService.CompleteSongLengths(songs);
+
+        // A song this user's sync catalog also holds goes out as the catalog describes it:
+        // same album, and filed under the library's own artist where there is one. A syncing
+        // client stores whichever description it read last, so the two must not disagree.
+        if (_syncCatalog is not null)
+            songs = songs.Select(song =>
+                !song.IsLocal && _syncCatalog.TryGetSong(username, song.Id, out var synced) ? synced : song).ToList();
+        // The discovery blend and the catalog swap hand back other objects; the source rides on by
+        // id, on a copy, since a catalog row is shared with other responses.
+        songs = songs.Select(song => suggested.TryGetValue(song.Id, out var by) && song.SuggestedBy != by
+            ? WithSuggestion(song, by) : song).ToList();
+        // A station refetched by a syncing client is not the listener choosing it, so it never
+        // renews the window in which a start counts for radio.
+        _radioOutcomes?.Served(username, songs.Select(song => (song.Id, RadioProvider.FromDisplayName(song.SuggestedBy))),
+            refresh: false);
         _radioQueueStore.Register(songs.Select(song => song.Id));
         _ = _metadataService.PrewarmYouTubeIdsAsync(songs, topN: 8);
         QueueRefreshIfStale(username);
@@ -567,8 +718,8 @@ public class SubsonicController : ControllerBase
         var parameters = await ExtractAllParameters();
         var format = parameters.GetValueOrDefault("f", "xml");
         var id = parameters.GetValueOrDefault("id", "");
-        if (id.StartsWith("or", StringComparison.Ordinal) && id.Length == 22)
-            return _responseBuilder.CreateError(format, 70, "Octo Radio stations are read-only");
+        if (IsOctoPlaylistId(id))
+            return _responseBuilder.CreateError(format, 70, "Octo's generated playlists are read-only");
         var endpoint = Request.Path.Value?.Split('/').LastOrDefault()?.Replace(".view", "")
             ?? "updateInternetRadioStation";
         var relay = await _proxyService.RelaySafeAsync("rest/" + endpoint, parameters);
@@ -589,8 +740,8 @@ public class SubsonicController : ControllerBase
         var parameters = await ExtractAllParameters();
         var format = parameters.GetValueOrDefault("f", "xml");
         var id = parameters.GetValueOrDefault("playlistId", parameters.GetValueOrDefault("id", ""));
-        if (id.StartsWith("or", StringComparison.Ordinal) && id.Length == 22)
-            return _responseBuilder.CreateError(format, 70, "Octo Radio stations are read-only");
+        if (IsOctoPlaylistId(id))
+            return _responseBuilder.CreateError(format, 70, "Octo's generated playlists are read-only");
         var endpoint = Request.Path.Value?.Split('/').LastOrDefault()?.Replace(".view", "") ?? "updatePlaylist";
         var relay = await _proxyService.RelaySafeAsync("rest/" + endpoint, parameters);
         return relay.Success && relay.Body is not null
@@ -598,12 +749,61 @@ public class SubsonicController : ControllerBase
             : _responseBuilder.CreateError(format, 0, "Unable to update playlist");
     }
 
+    /// <summary>
+    /// The playlist names in a relayed getPlaylists body, so provisioning can tell what is
+    /// already there without a second request. Best-effort: an unreadable body simply means
+    /// nothing is known to exist, and creating a duplicate is refused by Navidrome anyway.
+    /// </summary>
+    internal static IReadOnlyCollection<string> PlaylistNames(byte[]? body, string format)
+    {
+        if (body is not { Length: > 0 }) return [];
+        try
+        {
+            // XML too: Navidrome does not refuse a second playlist with the same name, so a client
+            // that asks for XML used to get every action playlist created again on each boot.
+            if (!format.Equals("json", StringComparison.OrdinalIgnoreCase))
+                return XDocument.Parse(Encoding.UTF8.GetString(body)).Descendants()
+                    .Where(element => element.Name.LocalName == "playlist")
+                    .Select(element => element.Attribute("name")?.Value)
+                    .Where(name => !string.IsNullOrEmpty(name))
+                    .Select(name => name!)
+                    .ToList();
+            var rows = JsonNode.Parse(body)?["subsonic-response"]?["playlists"]?["playlist"];
+            if (rows is not JsonArray array) return [];
+            return array.Select(row => row?["name"]?.GetValue<string>())
+                .Where(name => !string.IsNullOrEmpty(name))
+                .Select(name => name!)
+                .ToList();
+        }
+        catch { return []; }
+    }
+
     private List<LastFmRadioStation> VisibleStations(string username)
     {
         if (_radioStateStore is null || !_lastFmSettings.EnableRadio || username.Length == 0) return [];
         return _radioStateStore.GetUser(username).Stations.Where(station =>
-            station.Personalized ? _lastFmSettings.EnablePersonalizedStations
+            station.Personalized ? PersonalizedStationVisible(station)
                 : _lastFmSettings.EnableDiscoveryStations).ToList();
+    }
+
+    /// <summary>
+    /// Read-time half of the per-type station settings. The build gate decides what gets
+    /// made; this decides what a client sees, so switching a type off takes effect on the
+    /// next request instead of waiting for a rebuild. Same two-layer arrangement
+    /// EnablePersonalizedStations already uses.
+    /// </summary>
+    private bool PersonalizedStationVisible(LastFmRadioStation station)
+    {
+        if (!_lastFmSettings.EnablePersonalizedStations) return false;
+        return station.Kind switch
+        {
+            LastFmRadioStationKind.Starter or LastFmRadioStationKind.YourMix
+                => _lastFmSettings.EnableYourMix,
+            LastFmRadioStationKind.Discovery => _lastFmSettings.EnableDiscoveryMix,
+            LastFmRadioStationKind.Artist => _lastFmSettings.EffectiveArtistStationCount > 0,
+            LastFmRadioStationKind.Genre => _lastFmSettings.EffectiveGenreStationCount > 0,
+            _ => true,
+        };
     }
 
     private List<LastFmRadioStation> PlaylistStations(string username) =>
@@ -711,6 +911,13 @@ public class SubsonicController : ControllerBase
             });
     }
 
+    private static Song WithSuggestion(Song song, string by)
+    {
+        var copy = song.Copy();
+        copy.SuggestedBy = by;
+        return copy;
+    }
+
     private async Task<List<Song>> MaterializeStationAsync(LastFmRadioStation station,
         IReadOnlyDictionary<string, string> parameters)
     {
@@ -720,14 +927,19 @@ public class SubsonicController : ControllerBase
             await gate.WaitAsync(HttpContext.RequestAborted);
             try
             {
-                return await _radioTrackResolver.ResolveAsync(track.Artist, track.Title, track.Duration,
-                    parameters, HttpContext.RequestAborted) ?? new Song
+                var song = await _radioTrackResolver.ResolveAsync(track.Artist, track.Title, track.Duration,
+                    parameters, HttpContext.RequestAborted, track.YouTubeId) ?? new Song
                 {
                     Id = track.ResolvedId ?? "", Artist = track.Artist, Title = track.Title,
                     Album = track.Album ?? track.Title, Genre = track.Genre, Duration = track.Duration,
                     Year = track.Year, IsLocal = false, ExternalProvider = track.ExternalProvider,
                     ExternalId = track.ResolvedId
                 };
+                // A song that sounded like the seed was a library song; if it is gone, it is not
+                // worth streaming a stranger's copy of it.
+                if (track.Source == RadioProvider.SoundsAlike && !song.IsLocal) return new Song { Id = "" };
+                song.SuggestedBy = RadioProvider.DisplayName(track.Source);
+                return song;
             }
             finally { gate.Release(); }
         });
@@ -795,12 +1007,23 @@ public class SubsonicController : ControllerBase
         var searchEndpoint = isSearch2 ? "rest/search2" : "rest/search3";
         var envelope = isSearch2 ? "searchResult2" : "searchResult3";
 
-        // Discovery belongs on the first page only. Injected rows are regenerated per
-        // request rather than held in a server-side result set, so appending them to page
-        // two hands the client the same suggestions it already scrolled past. The native
-        // search path refuses later pages for exactly this reason; do the same here and
-        // let the library page normally underneath.
+        // Page one builds the discovery rows and remembers what it showed. A later page
+        // carries on from that instead of going to Navidrome at the same offset, which
+        // made every outside song past page one unreachable. See SearchLaterSongPageAsync.
         var songOffset = int.TryParse(parameters.GetValueOrDefault("songOffset", "0"), out var so) ? so : 0;
+
+        // A client that copies the library to the device walks it with an empty query and
+        // never searches the server, so the walk is the only place discovery can reach it.
+        // Scoped to the whole library: a walk of one music folder is left exactly as it was.
+        if (string.IsNullOrWhiteSpace(cleanQuery) && _syncCatalog is not null
+            && !parameters.ContainsKey("musicFolderId")
+            && SyncCatalogService.IsSyncClient(_subsonicSettings, parameters.GetValueOrDefault("c")))
+            return await SyncWalkPageAsync(parameters, searchEndpoint, envelope, format);
+
+        if (!string.IsNullOrWhiteSpace(cleanQuery) && songOffset > 0
+            && await SearchLaterSongPageAsync(parameters, cleanQuery, songOffset, searchEndpoint, envelope, format)
+                is { } laterPage)
+            return laterPage;
 
         if (string.IsNullOrWhiteSpace(cleanQuery) || songOffset > 0)
         {
@@ -831,7 +1054,8 @@ public class SubsonicController : ControllerBase
         // local floor used to be a flat 20, which is also the spec default for
         // songCount, so the most common search in the wild left nothing for
         // discovery at all (#14).
-        var (localSongTarget, externalTarget) = SearchBudget.Compute(requestedSongs);
+        var (localSongTarget, externalTarget) =
+            SearchBudget.Compute(requestedSongs, _subsonicSettings.EnableSearchDiscovery);
 
         // A client that asked for a handful of songs is searching as the user types. The
         // song side already costs nothing there (the budget leaves no room for discovery),
@@ -840,12 +1064,30 @@ public class SubsonicController : ControllerBase
         // album-only search still gets album discovery.
         var isTypeAheadProbe = requestedSongs > 0 && externalTarget == 0;
 
+        // Outside albums, artists and playlists are a fixed handful that all fit on the
+        // first page of their own list. Adding them again to a later album or artist page
+        // repeated the same suggestions on every page the client scrolled to.
+        var albumOffset = int.TryParse(parameters.GetValueOrDefault("albumOffset", "0"), out var ao) ? ao : 0;
+        var artistOffset = int.TryParse(parameters.GetValueOrDefault("artistOffset", "0"), out var aro) ? aro : 0;
+
         // Album discovery runs concurrently with the song fan-out below so it costs no
         // serial latency. It needs no Last.fm key (Deezer's catalog is keyless), so albums
         // still appear for a user who has not set one up.
-        var albumTask = requestedAlbums > 0 && !isTypeAheadProbe
+        var albumTask = requestedAlbums > 0 && albumOffset <= 0 && !isTypeAheadProbe && _subsonicSettings.EnableSearchDiscovery
             ? _externalSearch.GetAlbumsAsync(cleanQuery, Math.Min(requestedAlbums, 20))
             : Task.FromResult<IReadOnlyList<Album>>(new List<Album>());
+
+        // Artists the same way, and for the same reason: the merge has always known how to
+        // fold external artists in and dedupe them against local ones, but nothing ever
+        // gave it any, so the artist column of every search showed only what the library
+        // already had. Keyless like albums, so it works without a Last.fm key.
+        // What the library already holds of those albums, from their songs, started as soon as
+        // they are found so it runs alongside the song build rather than after it.
+        var ownershipTask = JudgeAlbumsAsync(albumTask);
+
+        var artistTask = requestedArtists > 0 && artistOffset <= 0 && !isTypeAheadProbe && _subsonicSettings.EnableSearchDiscovery
+            ? _metadataService.SearchArtistsAsync(cleanQuery, Math.Min(requestedArtists, 20))
+            : Task.FromResult(new List<Artist>());
 
         // One build per query, shared by every caller. Clients routinely fire several
         // search calls for a single typed query, and those calls resolve to the same
@@ -891,12 +1133,23 @@ public class SubsonicController : ControllerBase
         // If the relay failed outright the count is zero, and filling the page with
         // discovery is the right answer there too, since the merge will show no locals.
         var built = await externalTask;
-        var externalSlice = Math.Min(
-            built.Count,
-            externalTarget + Math.Max(0, localSongTarget - localParsed.Songs.Count));
+        var externalSlice = SearchSongOrder.PageOneExternalCount(
+            built.Count, localSongTarget, externalTarget, localParsed.Songs.Count);
         var externalSongs = built.Take(externalSlice).ToList();
 
-        var playlistTask = _subsonicSettings.EnableExternalPlaylists
+        // Remember what this page showed so the next page can carry on from it. Only when
+        // discovery was part of the answer (a type-ahead page has none to continue) and
+        // the library answered, since a failed relay would record an empty library.
+        // Filed under who asked; a request Octo cannot name (an API key Navidrome would not
+        // vouch for) is not remembered at all, so it can never land in someone else's slot.
+        if (externalTarget > 0 && localResult.Success
+            && await SongOrderKeyAsync(parameters, searchEndpoint, cleanQuery) is { } orderKey)
+        {
+            _searchSongOrders.Set(orderKey,
+                SearchSongOrder.From(built, requestedSongs, localSongTarget, externalTarget, localParsed.Songs));
+        }
+
+        var playlistTask = _subsonicSettings.EnableExternalPlaylists && albumOffset <= 0
             ? await _metadataService.SearchPlaylistsAsync(cleanQuery, requestedAlbums)
             : new List<ExternalPlaylist>();
 
@@ -910,11 +1163,26 @@ public class SubsonicController : ControllerBase
             externalAlbums = new List<Album>();
         }
 
+        List<Artist> externalArtists;
+        try { externalArtists = await artistTask; }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("external artist search failed for '{Q}': {M}", cleanQuery, ex.Message);
+            externalArtists = new List<Artist>();
+        }
+
+        // An album the library holds whole, or by its very name, is listed as the library's
+        // album; one it holds in part says how much. search2 lists folders, not albums, so
+        // nothing is added there and its outside albums stay, counted.
+        var (settledAlbums, addedAlbums) = await SettleSearchAlbumsAsync(externalAlbums, await ownershipTask,
+            localParsed.Albums, localResult.ContentType, parameters, canAdd: !isSearch2);
+        localParsed.Albums.AddRange(addedAlbums);
+
         var externalResult = new SearchResult
         {
             Songs = externalSongs,
-            Albums = externalAlbums.ToList(),
-            Artists = new List<Artist>(),
+            Albums = settledAlbums,
+            Artists = externalArtists,
         };
 
         // Track this response as a "queue" so a later scrobble for any of its
@@ -924,6 +1192,237 @@ public class SubsonicController : ControllerBase
         _radioQueueStore.Register(localSongIds.Concat(externalSongs.Select(s => s.Id)));
 
         return MergeSearchResults(localParsed, localResult.ContentType, externalResult, playlistTask, format, envelope);
+    }
+
+    /// <summary>
+    /// Where a search's order is kept: per user, so null when the request names nobody Octo can
+    /// vouch for. An API key sign-in carries no <c>u</c>; before this every such user shared
+    /// the one empty-name slot and could be handed another's order.
+    /// </summary>
+    private async Task<string?> SongOrderKeyAsync(Dictionary<string, string> parameters, string searchEndpoint,
+        string cleanQuery) =>
+        await _requestIdentity.UsernameAsync(parameters, _proxyService, HttpContext.RequestAborted) is { } user
+            ? SearchSongOrderCache.Key(user, parameters.GetValueOrDefault("c", ""), searchEndpoint,
+                parameters.GetValueOrDefault("musicFolderId"), cleanQuery)
+            : null;
+
+    /// <summary>
+    /// A later page of a search's songs: the next stretch of the order page one started
+    /// (its library rows, its outside rows, then the rest of the library), so paging never
+    /// repeats or skips a row. See <see cref="SearchSongPagePlanner"/>.
+    ///
+    /// Null when the page should go to Navidrome unchanged, as every later page used to:
+    /// discovery is off, or nothing is remembered for this search and the request is too
+    /// small to have earned discovery on its own (a type-ahead count).
+    /// </summary>
+    private async Task<IActionResult?> SearchLaterSongPageAsync(Dictionary<string, string> parameters,
+        string cleanQuery, int songOffset, string searchEndpoint, string envelope, string format)
+    {
+        if (!_subsonicSettings.EnableSearchDiscovery) return null;
+
+        var requestedSongs = int.TryParse(parameters.GetValueOrDefault("songCount", "20"), out var sc) ? sc : 20;
+        // With nobody to file it under, nothing is read or kept: every later page is rebuilt.
+        // For an API key sign-in the tokenInfo call that names the user is made with the
+        // request's own key, so it is also the credential check this page has not yet had.
+        var key = await SongOrderKeyAsync(parameters, searchEndpoint, cleanQuery);
+        var order = key is null ? null : _searchSongOrders.Get(key, requestedSongs, songOffset);
+        if (order is null)
+        {
+            // Nothing remembered: expired, or Octo restarted since page one. Build the order
+            // again as if page one had asked for this page's count. The build is shared with
+            // any page one still running for the query, so a client that asks for two pages
+            // at once gets one build.
+            var (localTarget, externalTarget) = SearchBudget.Compute(requestedSongs);
+            if (externalTarget == 0) return null;
+
+            var builtTask = _externalSearch.GetAsync(cleanQuery);
+            var prefix = await _proxyService.RelaySafeAsync(searchEndpoint, new Dictionary<string, string>(parameters)
+            {
+                ["songOffset"] = "0", ["songCount"] = localTarget.ToString(),
+                ["albumCount"] = "0", ["artistCount"] = "0",
+            });
+            if (IsFailedSubsonicBody(prefix.Body, prefix.ContentType))
+                return File(prefix.Body!, prefix.ContentType ?? $"application/{format}");
+            if (!prefix.Success || prefix.Body is null) return null;
+
+            var prefixSongs = _modelMapper.ParseSearchResponse(prefix.Body, prefix.ContentType).Songs;
+            order = SearchSongOrder.From(await builtTask, requestedSongs, localTarget, externalTarget, prefixSongs);
+            if (key is not null) _searchSongOrders.Set(key, order);
+            _logger.LogDebug("search '{Q}': page one's order was gone, rebuilt it for offset {Offset}",
+                cleanQuery, songOffset);
+        }
+
+        var page = SearchSongPagePlanner.Plan(songOffset, requestedSongs, order);
+
+        // One relay for the page's library rows and for the albums and artists, which page
+        // exactly as they always have on a later page: Navidrome's, at the client's offsets.
+        var localParams = new Dictionary<string, string>(parameters)
+        {
+            ["songOffset"] = page.LocalOffset.ToString(),
+            ["songCount"] = (page.LeadingLocals + page.TrailingLocals).ToString(),
+        };
+        var localResult = await _proxyService.RelaySafeAsync(searchEndpoint, localParams);
+        if (IsFailedSubsonicBody(localResult.Body, localResult.ContentType))
+            return File(localResult.Body!, localResult.ContentType ?? $"application/{format}");
+        // Navidrome did not answer. The page is not made from the order alone: without its
+        // library rows it would be short, and the client, taking it as it came, would never
+        // see those rows. It goes to Navidrome as every later page used to.
+        if (!localResult.Success || localResult.Body is null) return null;
+
+        var localParsed = _modelMapper.ParseSearchResponse(localResult.Body, localResult.ContentType);
+        var leading = localParsed.Songs.Take(page.LeadingLocals).ToList();
+        var trailing = localParsed.Songs.Skip(page.LeadingLocals).Take(page.TrailingLocals).ToList();
+
+        // Page one's own outside rows keep their places even where page one left one out
+        // because the library had it, so the rows after them do not shift.
+        var externalSongs = order.Built
+            .Skip(page.PageOneExternalSkip).Take(page.PageOneExternalTake)
+            .Where(song => !SubsonicModelMapper.IsListed(song, order.PrefixKeys))
+            .Concat(order.LaterExternals.Skip(page.LaterExternalSkip).Take(page.LaterExternalTake))
+            .ToList();
+
+        _logger.LogDebug(
+            "search '{Q}' page at {Offset}+{Count}: {Leading} library, {External} outside, {Trailing} library",
+            cleanQuery, songOffset, requestedSongs, leading.Count, externalSongs.Count, trailing.Count);
+
+        var localSongIds = ExtractLocalSongIds(localResult.Body, localResult.ContentType);
+        _radioQueueStore.Register(localSongIds.Take(leading.Count)
+            .Concat(externalSongs.Select(s => s.Id))
+            .Concat(localSongIds.Skip(leading.Count).Take(trailing.Count)));
+
+        return MergeSearchResults((leading, localParsed.Albums, localParsed.Artists), localResult.ContentType,
+            new SearchResult { Songs = externalSongs, Albums = new List<Album>(), Artists = new List<Artist>() },
+            new List<ExternalPlaylist>(), format, envelope, trailing);
+    }
+
+    /// <summary>
+    /// How long a sync page waits for the user's catalog to finish building before going
+    /// out without it. Kept short because a page the client gives up on fails its whole
+    /// sync, where a catalog that misses one sync is simply on the next.
+    /// </summary>
+    private static readonly TimeSpan SyncCatalogWait = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// One page of a sync walk: Navidrome's page, then, once the library has run out, the
+    /// user's catalog rows that fill the rest of it. See <see cref="SyncCatalogService"/>.
+    /// Each kind (artist, album, song) is paged on its own, since a client can walk them
+    /// separately or together.
+    /// </summary>
+    private async Task<IActionResult> SyncWalkPageAsync(Dictionary<string, string> parameters,
+        string searchEndpoint, string envelope, string format)
+    {
+        var relay = await _proxyService.RelaySafeAsync(searchEndpoint, parameters);
+        if (!relay.Success || relay.Body is not { Length: > 0 })
+            return _responseBuilder.CreateResponse(format, envelope, new { });
+        IActionResult Unchanged() => File(relay.Body, relay.ContentType ?? $"application/{format}");
+        if (IsFailedSubsonicBody(relay.Body, relay.ContentType)) return Unchanged();
+
+        var username = parameters.GetValueOrDefault("u", "");
+        var stations = VisibleStations(username);
+        // "Popular right now" rides along as one more station, so its outside songs are on the
+        // device under the ids its playlist lists.
+        if (Popular() is { } popular)
+        {
+            popular.Warm(username, parameters);
+            if (popular.AsSyncStation(username) is { } chart) stations = [.. stations, chart];
+        }
+        var rows = SyncCatalogResponse.CountRows(relay.Body, relay.ContentType, envelope);
+        if (username.Length == 0 || rows is null) return Unchanged();
+
+        int Number(string name, int fallback) =>
+            int.TryParse(parameters.GetValueOrDefault(name, ""), out var value) ? Math.Max(0, value) : fallback;
+        var pages = new[]
+        {
+            (Kind: SyncCatalogKind.Artist, Name: "artist", Returned: rows.Value.Artists),
+            (Kind: SyncCatalogKind.Album, Name: "album", Returned: rows.Value.Albums),
+            (Kind: SyncCatalogKind.Song, Name: "song", Returned: rows.Value.Songs),
+        }.Select(page => (page.Kind, page.Name, page.Returned,
+            Offset: Number(page.Name + "Offset", 0), Count: Number(page.Name + "Count", 20))).ToList();
+
+        // The first page of a walk starts the build, so it has the whole library's worth of
+        // pages to finish in before the walk reaches the catalog.
+        if (pages.Any(page => page.Offset == 0 && page.Count > 0))
+        {
+            QueueRefreshIfStale(username);
+            _syncCatalog!.Warm(username, stations, parameters);
+        }
+        if (stations.Count == 0) return Unchanged();
+
+        async Task<bool?> Exists(SyncCatalogKind kind, int index)
+        {
+            // The client's own empty query, since servers disagree on which spelling of
+            // "everything" they accept.
+            var probe = new Dictionary<string, string>(parameters)
+            {
+                ["f"] = "json",
+                ["artistCount"] = "0", ["albumCount"] = "0", ["songCount"] = "0",
+                ["artistOffset"] = "0", ["albumOffset"] = "0", ["songOffset"] = "0",
+            };
+            var name = kind.ToString().ToLowerInvariant();
+            probe[name + "Count"] = "1"; probe[name + "Offset"] = index.ToString();
+            var result = await _proxyService.RelaySafeAsync(searchEndpoint, probe);
+            if (!result.Success || result.Body is not { Length: > 0 }
+                || IsFailedSubsonicBody(result.Body, result.ContentType)) return null;
+            var counted = SyncCatalogResponse.CountRows(result.Body, result.ContentType ?? "application/json", envelope);
+            if (counted is null) return null;
+            return (kind switch
+            {
+                SyncCatalogKind.Artist => counted.Value.Artists,
+                SyncCatalogKind.Album => counted.Value.Albums,
+                _ => counted.Value.Songs,
+            }) > 0;
+        }
+
+        IReadOnlyList<Artist> artists = [];
+        IReadOnlyList<Album> albums = [];
+        IReadOnlyList<Song> songs = [];
+        SyncCatalog? used = null;
+        foreach (var page in pages)
+        {
+            if (page.Count == 0 || page.Returned >= page.Count) continue;
+            var localTotal = SyncCatalogService.LocalTotalFromPage(page.Offset, page.Returned)
+                ?? await SyncCatalogService.ResolveLocalTotalAsync(page.Offset,
+                    _syncCatalog!.RememberedLocalTotal(username, page.Kind), index => Exists(page.Kind, index));
+            if (localTotal is null) continue;
+
+            // A short page is only the end of the library if nothing follows it. A server that
+            // caps the page size also answers short, and filling that page would make the
+            // client skip the library rows the cap held back.
+            if (page.Returned > 0 && await Exists(page.Kind, localTotal.Value) != false) continue;
+
+            var (start, take) = SyncCatalogService.Window(page.Offset, page.Count, page.Returned, localTotal.Value);
+            var catalog = start > 0 ? _syncCatalog!.PinnedCatalog(username, page.Kind) : null;
+            if (catalog is null)
+            {
+                try
+                {
+                    catalog = await _syncCatalog!.GetAsync(username, stations, parameters)
+                        .WaitAsync(SyncCatalogWait, HttpContext.RequestAborted);
+                }
+                catch (TimeoutException)
+                {
+                    _logger.LogInformation(
+                        "Sync catalog for {User} still building; this sync ends at the library and the next one gets it",
+                        username);
+                    continue;
+                }
+            }
+            _syncCatalog!.Remember(username, page.Kind, localTotal.Value, catalog);
+            used = catalog;
+
+            var slice = SyncCatalogService.Slice(catalog, page.Kind, start, take);
+            if (slice.Artists.Count > 0) artists = slice.Artists;
+            if (slice.Albums.Count > 0) albums = slice.Albums;
+            if (slice.Songs.Count > 0) songs = slice.Songs;
+        }
+
+        if (used is null || artists.Count + albums.Count + songs.Count == 0) return Unchanged();
+        _logger.LogInformation(
+            "Sync walk for {User} ({Client}): added {Songs} songs, {Albums} albums, {Artists} artists after the library",
+            username, parameters.GetValueOrDefault("c", ""), songs.Count, albums.Count, artists.Count);
+        var body = SyncCatalogResponse.Append(relay.Body, relay.ContentType, envelope, _responseBuilder, used,
+            artists, albums, songs);
+        return File(body, relay.ContentType ?? $"application/{format}");
     }
 
     /// <summary>
@@ -1038,6 +1537,10 @@ public class SubsonicController : ControllerBase
             return await _proxyService.RelayStreamAsync(parameters, HttpContext.RequestAborted);
         }
 
+        // Navidrome checks the sign-in on everything relayed to it, but it never sees an outside
+        // song, so without this anyone who can reach Octo could play through it with no account.
+        if (await RefuseUnlessSignedInAsync(parameters, format) is { } refused) return refused;
+
         // A local file may only be served under an external id when this session DECLARES
         // that id as lossless. search3 already told the client a suffix, bitrate and size,
         // and a player picks its decoder from those, so handing back different bytes is
@@ -1055,13 +1558,24 @@ public class SubsonicController : ControllerBase
 
         try
         {
-            // Lossless-on-play remains an explicit opt-in. Normal playback never starts
-            // acquisition: owned ids already went to Navidrome above, and missing ids
-            // stream from YouTube below. Hearts are the normal permanent-copy gesture.
+            // Lossless-on-play remains an explicit opt-in. Normal playback starts no
+            // acquisition unless DownloadOnPlay or LidarrAlbumOnPlay are on: owned ids
+            // already went to Navidrome above, and missing ids stream from YouTube below.
+            // Hearts are the normal permanent-copy gesture.
+            // Only a request from the first byte is a play. Clients ask again with a later
+            // Range on every seek and while buffering. A transcoded request (format,
+            // maxBitRate) is still a play and counts.
+            if (IsFirstByteRequest(Request.Method, Request.Headers.Range.ToString()))
+            {
+                var who = await SignedInUserAsync(parameters);
+                _heartAcquisitions.QueuePlay(provider!, externalId!, RequesterFor(who),
+                    clientId: id, owner: who);
+            }
             if (_subsonicSettings.WaitForLosslessOnPlay)
             {
                 var acquisition = _acquisitions.Enqueue(provider!, externalId!, isStar: false,
-                    triggerAlbumDownload: false, forcePermanent: true);
+                    triggerAlbumDownload: false, forcePermanent: true,
+                    requestedBy: RequesterFor(await SignedInUserAsync(parameters)));
                 return await ServeAcquiredAsync(acquisition, provider!, externalId!, id, format,
                     allowPreviewFallback: true);
             }
@@ -1267,11 +1781,17 @@ public class SubsonicController : ControllerBase
                     album.ArtistId = artist.Id;
                 }
             }
+
+            // Each says how much of it the library holds. None is left out: the page lists no
+            // library album to stand in for one.
+            albums = await SettleArtistAlbumsAsync(albums, []);
             
             return _responseBuilder.CreateArtistResponse(format, artist, albums);
         }
 
-        var navidromeResult = await _proxyService.RelaySafeAsync("rest/getArtist", parameters);
+        // Merged from Navidrome's JSON whatever the client asked for, then answered in the
+        // client's format: see CreateMergedResponse.
+        var navidromeResult = await _proxyService.RelaySafeAsync("rest/getArtist", AsJson(parameters));
         
         if (!navidromeResult.Success || navidromeResult.Body == null)
         {
@@ -1284,7 +1804,7 @@ public class SubsonicController : ControllerBase
         var localAlbums = new List<object>();
         object? artistData = null;
 
-        if (format == "json" || navidromeResult.ContentType?.Contains("json") == true)
+        if (navidromeResult.ContentType?.Contains("json") == true)
         {
             var jsonDoc = JsonDocument.Parse(navidromeContent);
             if (jsonDoc.RootElement.TryGetProperty("subsonic-response", out var response) &&
@@ -1305,18 +1825,32 @@ public class SubsonicController : ControllerBase
 
         if (string.IsNullOrEmpty(artistName) || artistData == null)
         {
-            return File(navidromeResult.Body, navidromeResult.ContentType ?? "application/json");
+            return await RelayAsAskedAsync("rest/getArtist", parameters, format, navidromeResult.Body, navidromeResult.ContentType);
         }
 
-        var deezerArtists = await _metadataService.SearchArtistsAsync(artistName, 1);
+        var localAlbumTitles = localAlbums
+            .OfType<Dictionary<string, object>>()
+            .Select(dict => dict.TryGetValue("name", out var nameObj) ? nameObj?.ToString() : null)
+            .OfType<string>()
+            .ToList();
+
+        // The first hit is not reliably this artist: a bigger act whose name contains this one
+        // can come first. Of the few asked for, the one with this exact name is.
+        var deezerArtists = (await _metadataService.SearchArtistsAsync(artistName, 5))
+            .Where(found => SongIdentity.SameArtistName(found.Name, artistName))
+            .ToList();
         var deezerAlbums = new List<Album>();
         
         if (deezerArtists.Count > 0)
         {
             var deezerArtist = deezerArtists[0];
-            if (deezerArtist.Name.Equals(artistName, StringComparison.OrdinalIgnoreCase))
+            if (SongIdentity.SameArtistName(deezerArtist.Name, artistName))
             {
-                deezerAlbums = await _metadataService.GetArtistAlbumsAsync("deezer", deezerArtist.ExternalId!);
+                // The provider must come from the artist found, as for albums: a hardcoded
+                // "deezer" never matches the metadata service's name, so this was always empty.
+                // The library's own albums go along, to tell two artists of one name apart.
+                deezerAlbums = await _metadataService.GetArtistAlbumsAsync(deezerArtist.ExternalProvider!, deezerArtist.ExternalId!,
+                    localAlbumTitles);
                 
                 // Fill artist info for each album (Deezer API doesn't include it in artist/albums endpoint)
                 // Use local artist ID and name so albums link back to the local artist
@@ -1334,19 +1868,18 @@ public class SubsonicController : ControllerBase
             }
         }
 
-        var localAlbumNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var album in localAlbums)
-        {
-            if (album is Dictionary<string, object> dict && dict.TryGetValue("name", out var nameObj))
-            {
-                localAlbumNames.Add(nameObj?.ToString() ?? "");
-            }
-        }
+        // An owned album is one the library has by the matcher's key, so "Discovery" in the
+        // library hides the catalog's "Discovery" however either is spelled or punctuated.
+        var localAlbumNames = localAlbumTitles.Select(SongIdentity.Key).ToHashSet(StringComparer.Ordinal);
+
+        // Each outside album says how much of it the library holds; one the page's own albums
+        // hold whole, or by name, is left out.
+        deezerAlbums = await SettleArtistAlbumsAsync(deezerAlbums, localAlbums);
 
         var mergedAlbums = localAlbums.ToList();
         foreach (var deezerAlbum in deezerAlbums)
         {
-            if (!localAlbumNames.Contains(deezerAlbum.Title))
+            if (!localAlbumNames.Contains(SongIdentity.Key(deezerAlbum.Title)))
             {
                 mergedAlbums.Add(_responseBuilder.ConvertAlbumToJson(deezerAlbum));
             }
@@ -1358,12 +1891,7 @@ public class SubsonicController : ControllerBase
             artistDict["albumCount"] = mergedAlbums.Count;
         }
 
-        return _responseBuilder.CreateJsonResponse(new
-        {
-            status = "ok",
-            version = "1.16.1",
-            artist = artistData
-        });
+        return _responseBuilder.CreateMergedResponse(format, "artist", artistData);
     }
 
     /// <summary>
@@ -1436,10 +1964,15 @@ public class SubsonicController : ControllerBase
                 return _responseBuilder.CreateError(format, 70, "Album not found");
             }
 
+            // The songs the library already holds go out as the library's own copies.
+            if (await OutsideAlbumWithOwnedSongsAsync(album, parameters, format) is { } owned) return owned;
+
             return _responseBuilder.CreateAlbumResponse(format, album);
         }
 
-        var navidromeResult = await _proxyService.RelaySafeAsync("rest/getAlbum", parameters);
+        // Merged from Navidrome's JSON whatever the client asked for, then answered in the
+        // client's format: see CreateMergedResponse.
+        var navidromeResult = await _proxyService.RelaySafeAsync("rest/getAlbum", AsJson(parameters));
         
         if (!navidromeResult.Success || navidromeResult.Body == null)
         {
@@ -1452,7 +1985,7 @@ public class SubsonicController : ControllerBase
         var localSongs = new List<object>();
         object? albumData = null;
 
-        if (format == "json" || navidromeResult.ContentType?.Contains("json") == true)
+        if (navidromeResult.ContentType?.Contains("json") == true)
         {
             var jsonDoc = JsonDocument.Parse(navidromeContent);
             if (jsonDoc.RootElement.TryGetProperty("subsonic-response", out var response) &&
@@ -1474,58 +2007,39 @@ public class SubsonicController : ControllerBase
 
         if (string.IsNullOrEmpty(albumName) || string.IsNullOrEmpty(artistName) || albumData == null)
         {
-            return File(navidromeResult.Body, navidromeResult.ContentType ?? "application/json");
+            return await RelayAsAskedAsync("rest/getAlbum", parameters, format, navidromeResult.Body, navidromeResult.ContentType);
         }
 
+        var library = localSongs.Select(AlbumFillIn.FromSubsonic).ToList();
+
+        // The first catalog album by this name that holds the library's songs, known by ISRC
+        // or by title and length. A name alone can belong to another record: "Nightcore" by
+        // "Nightcore" (octo-player#1).
         var searchQuery = $"{artistName} {albumName}";
         var deezerAlbums = await _metadataService.SearchAlbumsAsync(searchQuery, 5);
         Album? deezerAlbum = null;
-        
-        // Find matching album on Deezer (exact match first)
-        foreach (var candidate in deezerAlbums)
+        foreach (var candidate in AlbumFillIn.Candidates(deezerAlbums, artistName, albumName, AlbumFillIn.CountSongs(library)))
         {
-            if (candidate.Artist != null && 
-                candidate.Artist.Equals(artistName, StringComparison.OrdinalIgnoreCase) &&
-                candidate.Title.Equals(albumName, StringComparison.OrdinalIgnoreCase))
+            // The provider must come from the candidate. A hardcoded "deezer" never
+            // matches the metadata service's provider name, so this always returned null.
+            var detail = await _metadataService.GetAlbumAsync(candidate.ExternalProvider!, candidate.ExternalId!);
+            if (detail is null || detail.Songs.Count == 0) continue;
+            if (AlbumFillIn.Holds(library, detail.Songs))
             {
-                // The provider must come from the candidate. A hardcoded "deezer" never
-                // matches the metadata service's provider name, so this always returned null.
-                deezerAlbum = await _metadataService.GetAlbumAsync(candidate.ExternalProvider!, candidate.ExternalId!);
+                deezerAlbum = detail;
                 break;
             }
+            _logger.LogDebug(
+                "getAlbum '{Artist} - {Album}': catalog album {Id} shares the name but not the songs; not filled in from it",
+                artistName, albumName, candidate.ExternalId);
         }
 
-        // Fallback to fuzzy match
-        if (deezerAlbum == null)
+        if (deezerAlbum != null)
         {
-            foreach (var candidate in deezerAlbums)
-            {
-                if (candidate.Artist != null && 
-                    candidate.Artist.Contains(artistName, StringComparison.OrdinalIgnoreCase) &&
-                    (candidate.Title.Contains(albumName, StringComparison.OrdinalIgnoreCase) ||
-                     albumName.Contains(candidate.Title, StringComparison.OrdinalIgnoreCase)))
-                {
-                    deezerAlbum = await _metadataService.GetAlbumAsync(candidate.ExternalProvider!, candidate.ExternalId!);
-                    break;
-                }
-            }
-        }
-
-        if (deezerAlbum != null && deezerAlbum.Songs.Count > 0)
-        {
-            var localSongTitles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var song in localSongs)
-            {
-                if (song is Dictionary<string, object> dict && dict.TryGetValue("title", out var titleObj))
-                {
-                    localSongTitles.Add(titleObj?.ToString() ?? "");
-                }
-            }
-
             var mergedSongs = localSongs.ToList();
             foreach (var deezerSong in deezerAlbum.Songs)
             {
-                if (!localSongTitles.Contains(deezerSong.Title))
+                if (!AlbumFillIn.Owned(library, deezerSong))
                 {
                     mergedSongs.Add(_responseBuilder.ConvertSongToJson(deezerSong));
                 }
@@ -1554,12 +2068,7 @@ public class SubsonicController : ControllerBase
             }
         }
 
-        return _responseBuilder.CreateJsonResponse(new
-        {
-            status = "ok",
-            version = "1.16.1",
-            album = albumData
-        });
+        return _responseBuilder.CreateMergedResponse(format, "album", albumData);
     }
 
     /// <summary>
@@ -1591,9 +2100,38 @@ public class SubsonicController : ControllerBase
             parameters.GetValueOrDefault("u", ""), id);
         if (radioStation is not null)
         {
-            var bytes = _coverArtService?.GetRadioStationCover(radioStation.Name);
-            if (bytes is not null && bytes.Length > 0) return File(bytes, "image/jpeg");
-            return ServePlaceholder();
+            if (_coverArtService is null) return ServePlaceholder(branded: false);
+            var seeds = StationCoverSeeds(radioStation);
+            var bytes = await _coverArtService.GetListCoverAsync(
+                new ListCover(radioStation.Name, StationCoverLabel(radioStation), ListKinds.Radio,
+                    _ => Task.FromResult(seeds), radioStation.Tracks.Count),
+                RequestedCoverSize(parameters), HttpContext.RequestAborted);
+            return File(bytes, "image/jpeg");
+        }
+
+        // A mix is the listener's own library, so its cover carries no Octo mark: the logo says
+        // where a result came from, and this came from them.
+        var coverUser = parameters.GetValueOrDefault("u", "");
+        if (Popular() is { } popularCover && popularCover.IsTheList(coverUser, id))
+        {
+            if (_coverArtService is null) return ServePlaceholder(branded: false);
+            var chart = popularCover.Playlist(coverUser);
+            var bytes = await _coverArtService.GetListCoverAsync(
+                new ListCover(chart.Name, null, ListKinds.Chart,
+                    _ => Task.FromResult(PopularCoverSeeds(popularCover, coverUser, parameters)),
+                    chart.PoolSize > 0 ? chart.PoolSize : null),
+                RequestedCoverSize(parameters), HttpContext.RequestAborted);
+            return File(bytes, "image/jpeg");
+        }
+        if (_generatedPlaylists?.Find(coverUser, id) is { } mixCover)
+        {
+            if (_coverArtService is null) return ServePlaceholder(branded: false);
+            var bytes = await _coverArtService.GetListCoverAsync(
+                new ListCover(mixCover.Name, mixCover.Label, ListKinds.Mix,
+                    ct => MixCoverSeedsAsync(coverUser, mixCover, parameters, ct),
+                    _generatedPlaylists.Drawn(coverUser, mixCover)?.Count),
+                RequestedCoverSize(parameters), HttpContext.RequestAborted);
+            return File(bytes, "image/jpeg");
         }
 
         // Playlist covers haven't changed — keep the existing path.
@@ -1623,6 +2161,10 @@ public class SubsonicController : ControllerBase
         // Registry-backed id (song / album / artist). Resolve to artist+title via the
         // registry and look the cover up on iTunes. Watermark with the Octo logo so
         // radio-sourced art is visually distinct from local-library art.
+        // The Octo app marks songs outside the library itself, so its covers come back
+        // plain, and a missing one is a 404 it draws its own empty tile for. Every other
+        // client keeps the badge, the only sign it gets that a song came from Octo's search.
+        var plain = DrawsItsOwnMarks(parameters);
         var routing = _idRegistry.Lookup(id);
         if (routing != null)
         {
@@ -1633,16 +2175,16 @@ public class SubsonicController : ControllerBase
                 {
                     _logger.LogDebug("cover art all-source miss for {Kind} '{A} - {T}/{Al}', serving placeholder",
                         routing.Kind, routing.Artist, routing.Title, routing.Album);
-                    return ServePlaceholder();
+                    return plain ? NotFound() : ServePlaceholder();
                 }
 
-                var watermarked = _coverArtService?.AddOctoBadge(raw) ?? raw;
+                var watermarked = plain ? raw : _coverArtService?.AddOctoBadge(raw) ?? raw;
                 return File(watermarked, "image/jpeg");
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Cover art pipeline failed for registry id {Id}", id);
-                return ServePlaceholder();
+                return plain ? NotFound() : ServePlaceholder();
             }
         }
 
@@ -1652,7 +2194,7 @@ public class SubsonicController : ControllerBase
         if (id.StartsWith("ext-album-", StringComparison.OrdinalIgnoreCase)
             || id.StartsWith("ext-artist-", StringComparison.OrdinalIgnoreCase))
         {
-            return ServePlaceholder();
+            return plain ? NotFound() : ServePlaceholder();
         }
 
         // Existing ext-{provider}-{type}-{id} path (Deezer/Tidal-era, kept for
@@ -1675,11 +2217,11 @@ public class SubsonicController : ControllerBase
                 if (response.IsSuccessStatusCode)
                 {
                     var imageBytes = await response.Content.ReadAsByteArrayAsync();
-                    var watermarked = _coverArtService?.AddOctoBadge(imageBytes) ?? imageBytes;
+                    var watermarked = plain ? imageBytes : _coverArtService?.AddOctoBadge(imageBytes) ?? imageBytes;
                     return File(watermarked, "image/jpeg");
                 }
             }
-            return ServePlaceholder();
+            return plain ? NotFound() : ServePlaceholder();
         }
 
         // Local library — proxy to Navidrome unchanged.
@@ -1701,6 +2243,132 @@ public class SubsonicController : ControllerBase
         }
     }
 
+    /// <summary>The size a client asked a cover at, if it asked.</summary>
+    private static int? RequestedCoverSize(IReadOnlyDictionary<string, string> parameters) =>
+        int.TryParse(parameters.GetValueOrDefault("size", ""), out var size) && size > 0 ? size : null;
+
+    /// <summary>A genre or pinned station's tag, which stands in for its colour when its songs give none.</summary>
+    private static string? StationCoverLabel(LastFmRadioStation station) =>
+        station.Kind is LastFmRadioStationKind.Genre or LastFmRadioStationKind.Pinned or LastFmRadioStationKind.Discovery
+            ? station.Seeds.FirstOrDefault()
+            : null;
+
+    /// <summary>
+    /// The songs whose covers colour a station's cover: its seed artists' songs first (the
+    /// artist of an artist station, the top seeds of Your Mix), then its first songs, one per
+    /// album, four at most. Looked up like any song's cover outside the library.
+    /// </summary>
+    internal IReadOnlyList<CoverSeed> StationCoverSeeds(LastFmRadioStation station)
+    {
+        if (_coverArtAggregator is not { } covers) return [];
+        var seedArtists = station.Kind is LastFmRadioStationKind.Artist or LastFmRadioStationKind.YourMix or LastFmRadioStationKind.Starter
+            ? station.Seeds.Take(3).Select(SongIdentity.Key).Where(key => key.Length > 0).ToList()
+            : [];
+        int Rank(LastFmRadioTrack track)
+        {
+            var index = seedArtists.IndexOf(SongIdentity.Key(track.Artist));
+            return index < 0 ? seedArtists.Count : index;
+        }
+        return station.Tracks
+            .Where(track => !string.IsNullOrWhiteSpace(track.Artist) && !string.IsNullOrWhiteSpace(track.Title))
+            .Select((track, order) => (track, order))
+            .OrderBy(pair => Rank(pair.track)).ThenBy(pair => pair.order)
+            .Select(pair => pair.track)
+            .DistinctBy(track => SongIdentity.Key(track.Artist) + "|" + SongIdentity.Key(track.Album ?? track.Title))
+            .Take(4)
+            .Select(track => new CoverSeed(
+                $"song|{SongIdentity.Key(track.Artist)}|{SongIdentity.Key(track.Title)}",
+                ct => covers.GetCoverAsync(new SoulseekRouting
+                {
+                    Kind = RoutingKind.Song, Artist = track.Artist, Title = track.Title, Album = track.Album,
+                }, false, ct)))
+            .ToList();
+    }
+
+    private const int CatalogImageMaxBytes = 8 * 1024 * 1024;
+
+    /// <summary>A cover the catalog's own image host serves over https (cdn-images.dzcdn.net and its kin).</summary>
+    internal static bool IsCatalogImage(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri)
+        && uri.Scheme == Uri.UriSchemeHttps
+        && (uri.Host.Equals("dzcdn.net", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".dzcdn.net", StringComparison.OrdinalIgnoreCase));
+
+    private static async Task<byte[]?> CatalogImageAsync(IHttpClientFactory http, string url, CancellationToken ct)
+    {
+        try
+        {
+            using var response = await http.CreateClient(Octo.Services.Metadata.DeezerRateLimiter.ClientName)
+                .GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > CatalogImageMaxBytes) return null;
+            await using var body = await response.Content.ReadAsStreamAsync(ct);
+            using var copy = new MemoryStream();
+            var buffer = new byte[81920];
+            int read;
+            while ((read = await body.ReadAsync(buffer, ct)) > 0)
+            {
+                if (copy.Length + read > CatalogImageMaxBytes) return null;
+                copy.Write(buffer, 0, read);
+            }
+            return copy.ToArray();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The songs whose covers colour a mix's cover: the first of this period's draw, one per
+    /// album cover, four at most, read from Navidrome as the listener. A period's first draw is
+    /// made only for a caller Navidrome accepts, as opening the mix would.
+    /// </summary>
+    private async Task<IReadOnlyList<CoverSeed>> MixCoverSeedsAsync(string username,
+        Octo.Services.Library.GeneratedPlaylist mix, Dictionary<string, string> parameters, CancellationToken ct)
+    {
+        if (_generatedPlaylists is null) return [];
+        // New Releases is mostly albums Navidrome has never heard of: its covers come from the
+        // catalog's own image host, as the album pages of outside albums do. Only that host, over
+        // https, through the catalog's client (8 second limit), and no picture bigger than 8 MB.
+        if (mix.Kind == Octo.Services.Library.ForYouLists.NewReleasesKind)
+        {
+            var http = HttpContext.RequestServices.GetService<IHttpClientFactory>();
+            if (http is null) return [];
+            return _generatedPlaylists.ForYouCovers(username)
+                .Where(IsCatalogImage)
+                .Select(url => new CoverSeed("catalog|" + url, token => CatalogImageAsync(http, url, token)))
+                .ToList();
+        }
+        var auth = parameters.Where(pair => pair.Key is not ("id" or "size")).ToDictionary(pair => pair.Key, pair => pair.Value);
+        var songs = _generatedPlaylists.Drawn(username, mix);
+        if (songs is null)
+        {
+            var ping = await _proxyService.RelaySafeAsync("rest/ping", auth);
+            if (!ping.Success || ping.Body is null || !IsSuccessfulSubsonicResponse(ping.Body, auth.GetValueOrDefault("f", "xml")))
+                return [];
+            // Not cancelled with the cover: a draw that finishes late still serves the next request.
+            songs = await _generatedPlaylists.MaterializeAsync(username, mix, parameters, CancellationToken.None).WaitAsync(ct);
+        }
+        return songs
+            .Select(song => song["coverArt"]?.ToString())
+            .Where(cover => !string.IsNullOrEmpty(cover))
+            .Distinct(StringComparer.Ordinal)
+            .Take(4)
+            .Select(cover => new CoverSeed("navidrome|" + cover, async _ =>
+            {
+                var picture = await _proxyService.RelayAsync("rest/getCoverArt",
+                    new Dictionary<string, string>(auth) { ["id"] = cover!, ["size"] = "128" });
+                return picture.ContentType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true ? picture.Body : null;
+            }))
+            .ToList();
+    }
+
+    /// <summary>Whether the request comes from the Octo app, which shows on its own
+    /// artwork that a song is not in the library, so it wants covers without the badge.
+    /// Told apart by the Subsonic client name it sends on every call.</summary>
+    internal static bool DrawsItsOwnMarks(IReadOnlyDictionary<string, string> parameters) =>
+        string.Equals(parameters.GetValueOrDefault("c", "")?.Trim(), "Octo", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// Returns a 200 response with the Octo placeholder JPEG. Used in every code
     /// path that previously returned 404 — Subsonic clients (Arpeggio especially)
@@ -1716,13 +2384,34 @@ public class SubsonicController : ControllerBase
 
     #region Helper Methods
 
+    /// <summary>The same request, asking Navidrome for JSON, which is what the merges read.</summary>
+    private static Dictionary<string, string> AsJson(Dictionary<string, string> parameters) =>
+        new(parameters) { ["f"] = "json" };
+
+    /// <summary>
+    /// Navidrome's answer untouched, when there is nothing to merge: the JSON already in hand
+    /// for a JSON client, otherwise asked again in the client's own format so an XML client
+    /// never gets JSON.
+    /// </summary>
+    private async Task<IActionResult> RelayAsAskedAsync(
+        string endpoint, Dictionary<string, string> parameters, string format, byte[] jsonBody, string? jsonContentType)
+    {
+        if (format == "json")
+            return File(jsonBody, jsonContentType ?? "application/json");
+        var asked = await _proxyService.RelaySafeAsync(endpoint, parameters);
+        if (!asked.Success || asked.Body == null)
+            return _responseBuilder.CreateError(format, 70, "Not found");
+        return File(asked.Body, asked.ContentType ?? "application/xml");
+    }
+
     private IActionResult MergeSearchResults(
         (List<object> Songs, List<object> Albums, List<object> Artists) local,
         string? localContentType,
         SearchResult externalResult,
         List<ExternalPlaylist> playlistResult,
         string format,
-        string envelope)
+        string envelope,
+        List<object>? trailingLocalSongs = null)
     {
         var (localSongs, localAlbums, localArtists) = local;
 
@@ -1733,7 +2422,8 @@ public class SubsonicController : ControllerBase
             localArtists,
             externalResult,
             playlistResult,
-            isJson);
+            isJson,
+            trailingLocalSongs);
 
         if (isJson)
         {
@@ -1800,7 +2490,8 @@ public class SubsonicController : ControllerBase
     #endregion
 
     /// <summary>
-    /// Stars (favorites) an item. For playlists and external songs, triggers download.
+    /// Stars (favorites) an item. For playlists, triggers download. For external songs and
+    /// albums, triggers a download and, outside Octo's own apps, favorites it once it arrives.
     /// </summary>
     [HttpGet, HttpPost]
     [Route("rest/star")]
@@ -1819,7 +2510,10 @@ public class SubsonicController : ControllerBase
             {
                 return _responseBuilder.CreateError(format, 0, "Playlist functionality is not enabled");
             }
-            
+
+            // Navidrome never sees this id, so nothing else would check who is asking.
+            if (await RefuseUnlessSignedInAsync(parameters, format) is { } refused) return refused;
+
             _logger.LogInformation("Starring external playlist {PlaylistId}, triggering download", itemId);
             
             // Trigger playlist download in background
@@ -1850,6 +2544,9 @@ public class SubsonicController : ControllerBase
         if (!string.IsNullOrEmpty(albumCandidate)
             && _idRegistry.Lookup(albumCandidate)?.Kind == RoutingKind.Album)
         {
+            // Navidrome never sees this id, so nothing else would check who is asking.
+            if (await RefuseUnlessSignedInAsync(parameters, format) is { } refused) return refused;
+
             if (!_subsonicSettings.EffectiveHeartDownloadSources()
                     .Any(step => step.AlbumEnabled == true))
             {
@@ -1884,7 +2581,17 @@ public class SubsonicController : ControllerBase
 
             // An empty exclude means "download every track". The engine already skips
             // tracks that are downloaded or in flight and isolates per-track failures.
-            _heartAcquisitions.QueueAlbum(albumProviderName, albumCandidate);
+            //
+            // The progress list is claimed first, so the chain's first step already has a row
+            // to move. Its name is the one the request signed in as (for an API key, its owner
+            // as Navidrome names it), not RequesterFor: it decides who may see the row, and it
+            // is never written anywhere.
+            var who = await SignedInUserAsync(parameters);
+            // Held before the download is queued, so one that finishes at once still finds it.
+            if (FavoriteCredential(parameters) is { } credential)
+                _starOnArrival!.HoldAlbum(albumProviderName, albumCandidate, credential, who);
+            _acquisitionTracker?.BeginAlbum(albumProviderName, albumCandidate, who);
+            _heartAcquisitions.QueueAlbum(albumProviderName, albumCandidate, RequesterFor(who));
 
             // Navidrome has never seen this id, so relaying the star would just error.
             return _responseBuilder.CreateResponse(format, "starred", new { });
@@ -1896,6 +2603,9 @@ public class SubsonicController : ControllerBase
         if (isExternal && _subsonicSettings.EffectiveHeartDownloadSources()
                 .Any(step => step.SongEnabled == true))
         {
+            // Navidrome never sees this id, so nothing else would check who is asking.
+            if (await RefuseUnlessSignedInAsync(parameters, format) is { } refused) return refused;
+
             // No storage-mode gate any more. It used to exclude Permanent on the grounds
             // that playing a track there already downloads it, but that was only ever true
             // through the blocking play path — so in Permanent mode a star fell through to
@@ -1906,7 +2616,16 @@ public class SubsonicController : ControllerBase
             // than inheriting whatever a concurrent play happened to ask for.
             _logger.LogInformation("Starring external song {SongId}, queueing permanent download", itemId);
 
-            _heartAcquisitions.QueueTrack(provider!, externalId!);
+            // Keyed by what the pipeline knows, labelled with the id the client starred so the
+            // app can find its row. Named from the routing, which is already in memory.
+            var who = await SignedInUserAsync(parameters);
+            // Held before the download is queued, so one that finishes at once still finds it.
+            if (FavoriteCredential(parameters) is { } credential)
+                _starOnArrival!.HoldSong(provider!, externalId!, credential, who);
+            var routing = _idRegistry.Lookup(externalId!);
+            _acquisitionTracker?.Begin(provider!, externalId!, itemId, who,
+                routing?.Artist, routing?.Title, routing?.Album);
+            _heartAcquisitions.QueueTrack(provider!, externalId!, RequesterFor(who));
 
             // Return success response immediately
             return _responseBuilder.CreateResponse(format, "starred", new { });
@@ -1929,6 +2648,388 @@ public class SubsonicController : ControllerBase
         catch (HttpRequestException ex)
         {
             return _responseBuilder.CreateError(format, 0, $"Error connecting to Subsonic server: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The caller's own hearted downloads, while they run and for half an hour after, so the
+    /// app can draw progress on the button that started one. Octo answers this itself, so it
+    /// works wherever the Subsonic API does, including away from home, unlike the admin API.
+    ///
+    /// Credentials are checked the way a station or a mix checks them: a ping to Navidrome with
+    /// the caller's own. Only rows that user asked for come back, admin or not.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/getAcquisitions")]
+    [Route("rest/getAcquisitions.view")]
+    public async Task<IActionResult> GetAcquisitions()
+    {
+        var parameters = await ExtractAllParameters();
+        const string format = "json";
+
+        var auth = parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+        auth["f"] = format;
+        var check = await _proxyService.RelaySafeAsync("rest/ping", auth);
+        if (!check.Success || check.Body is null)
+            return _responseBuilder.CreateError(format, 0, "Octo can't reach Navidrome to check who is asking");
+        if (!IsSuccessfulSubsonicResponse(check.Body, format))
+            return _responseBuilder.CreateError(format, 40, "Wrong username or password");
+
+        var username = await SignedInUserAsync(parameters);
+        var rows = _acquisitionTracker is not null && !string.IsNullOrWhiteSpace(username)
+            ? _acquisitionTracker.ForUser(username)
+            : [];
+        return _responseBuilder.CreateAcquisitionsResponse(rows);
+    }
+
+    /// <summary>
+    /// Navidrome's extension list with octoAcquisitions added, so a client can tell this server
+    /// answers getAcquisitions before it asks, octoLibraryActions while library actions are
+    /// on, and octoTopSongs while search discovery is. Relayed, then merged; no credentials are needed, as the OpenSubsonic spec has it.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/getOpenSubsonicExtensions")]
+    [Route("rest/getOpenSubsonicExtensions.view")]
+    public async Task<IActionResult> GetOpenSubsonicExtensions()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var relay = await _proxyService.RelaySafeAsync("rest/getOpenSubsonicExtensions", parameters);
+        return _responseBuilder.MergeOpenSubsonicExtensions(format,
+            relay.Success ? relay.Body : null, relay.ContentType,
+            lyricsChoices: _lyricsChoices is not null && _metadataSettings?.CurrentValue.FetchLyrics == true,
+            libraryActions: _libraryActions is not null && _libraryActionSettings.CurrentValue.Enabled,
+            topSongs: _subsonicSettings.EnableSearchDiscovery,
+            radioSources: _songRadio.Enabled);
+    }
+
+    /// <summary>
+    /// octoLibraryActions v1: what the caller may do to library files from the app, read from the
+    /// settings as they are now. Always JSON. Credentials are checked with a ping to Navidrome, as
+    /// getAcquisitions checks them.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/getLibraryActions")]
+    [Route("rest/getLibraryActions.view")]
+    public async Task<IActionResult> GetLibraryActions()
+    {
+        var parameters = await ExtractAllParameters();
+        if (await CheckCallerAsync(parameters) is { } refused) return refused;
+        var edits = HttpContext.RequestServices.GetService<Octo.Services.Library.LibraryEditService>();
+        return _responseBuilder.CreateLibraryActionsResponse(_libraryActionSettings.CurrentValue,
+            parameters.GetValueOrDefault("u"), _downloadConcurrency?.Current ?? 1, UpgradeReady, UpgradeSourceName,
+            admin: await IsCallerAdminAsync(parameters), edits: edits is not null,
+            covers: HttpContext.RequestServices.GetService<Octo.Services.CoverArt.IAlbumCoverFinder>() is not null);
+    }
+
+    /// <summary>
+    /// octoLibraryActions v3: the songs the server holds in its trash, newest first, for an app to
+    /// offer putting one back. Always JSON; credentials checked like getLibraryActions, and listed
+    /// only to someone who could put them back.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/getLibraryTrash")]
+    [Route("rest/getLibraryTrash.view")]
+    public async Task<IActionResult> GetLibraryTrash()
+    {
+        var parameters = await ExtractAllParameters();
+        if (await CheckCallerAsync(parameters) is { } refused) return refused;
+        var edits = HttpContext.RequestServices.GetService<Octo.Services.Library.LibraryEditService>();
+        var allowed = edits is not null
+            && edits.Refusal(parameters.GetValueOrDefault("u"), await IsCallerAdminAsync(parameters)) is null;
+        return _responseBuilder.CreateLibraryTrashResponse(allowed ? edits!.Trash() : [],
+            _libraryActionSettings.CurrentValue.EffectiveQuarantineRetentionDays);
+    }
+
+    /// <summary>
+    /// octoLibraryActions v2: the caller's upgrade jobs and how each is going, read by the apps while
+    /// an upgrade they asked for is running. Always JSON; credentials checked like getLibraryActions.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/getUpgrades")]
+    [Route("rest/getUpgrades.view")]
+    public async Task<IActionResult> GetUpgrades()
+    {
+        var parameters = await ExtractAllParameters();
+        if (await CheckCallerAsync(parameters) is { } refused) return refused;
+        var username = parameters.GetValueOrDefault("u");
+        var jobs = string.IsNullOrWhiteSpace(username) || _upgradeQueue is null
+            ? []
+            : _upgradeQueue.Snapshot(username);
+        var progress = (_acquisitionTracker?.All() ?? [])
+            .GroupBy(row => $"{row.Provider}:{row.ExternalId}")
+            .ToDictionary(group => group.Key, group => group.First().Progress);
+        return _responseBuilder.CreateUpgradesResponse(jobs.Select(job =>
+            (job, job.AcquisitionKey is { } key && job.State == Octo.Services.Library.UpgradeStates.Working
+                ? progress.GetValueOrDefault(key) : null)));
+    }
+
+    /// <summary>
+    /// octoLibraryActions v1: remove one song, exactly as putting it in the Delete action playlist
+    /// does. The executor applies every gate: the master switch, the allowlist, Delete being on,
+    /// the dry run, and a file it can prove is this song, which goes to quarantine.
+    ///
+    /// Never through a rating: where rating actions are on, one star can remove a song, and this
+    /// is how an app removes one without giving it a rating.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/libraryAction")]
+    [Route("rest/libraryAction.view")]
+    public async Task<IActionResult> ApplyLibraryAction()
+    {
+        var parameters = await ExtractAllParameters();
+        const string format = "json";
+        if (await CheckCallerAsync(parameters) is { } refused) return refused;
+
+        var id = parameters.GetValueOrDefault("id", "").Trim();
+        var action = parameters.GetValueOrDefault("action", "").Trim();
+        if (id.Length == 0 || action.Length == 0)
+            return _responseBuilder.CreateError(format, 10, "Required parameter is missing: id and action");
+        if (action.Equals(SubsonicResponseBuilder.UpgradeAction, StringComparison.OrdinalIgnoreCase))
+            return QueueUpgrade(id, parameters.GetValueOrDefault("u"));
+        if (SubsonicResponseBuilder.EditActions.FirstOrDefault(a => a.Equals(action, StringComparison.OrdinalIgnoreCase)) is { } edit)
+            return await ApplyLibraryEdit(id, edit, parameters);
+        if (!action.Equals(SubsonicResponseBuilder.RemoveAction, StringComparison.OrdinalIgnoreCase))
+            return _responseBuilder.CreateError(format, 0,
+                $"Unknown action \"{action}\"; this server knows remove, upgrade, {string.Join(", ", SubsonicResponseBuilder.EditActions)}");
+
+        // The name the ping just checked. An API key alone names nobody here, so it cannot be on
+        // the allowlist, and the executor is not asked at all.
+        var username = parameters.GetValueOrDefault("u");
+        if (string.IsNullOrWhiteSpace(username))
+            return _responseBuilder.CreateLibraryActionResponse(id, new Octo.Services.Library.LibraryActionOutcome(
+                Octo.Services.Library.LibraryActionState.Skipped,
+                "Sign in with a username to remove songs; an API key alone does not say who is asking."));
+        if (_libraryActions is null)
+            return _responseBuilder.CreateLibraryActionResponse(id, new Octo.Services.Library.LibraryActionOutcome(
+                Octo.Services.Library.LibraryActionState.Skipped, "Library actions are off."));
+
+        // Taking a file off the disk is for the server's admins, whatever the allowed list says.
+        if (!await IsCallerAdminAsync(parameters))
+            return _responseBuilder.CreateLibraryActionResponse(id, new Octo.Services.Library.LibraryActionOutcome(
+                Octo.Services.Library.LibraryActionState.Skipped, "Only a server admin can remove songs from the library."));
+
+        // Not tied to the request: a client that hangs up must not stop a move halfway.
+        // copy=true: Library health removing a second copy, so the song itself is still wanted.
+        var onlyACopy = parameters.GetValueOrDefault("copy", "") is "true" or "1";
+        var outcome = await _libraryActions.ApplyAsync(
+            new Octo.Services.Library.LibraryActionRequest(LibraryAction.Delete, id, username, OnlyACopy: onlyACopy),
+            CancellationToken.None);
+        _logger.LogInformation("Library action Delete for {Id} by {User} from the app: {State} - {Detail}",
+            id, username, outcome.State, outcome.Detail);
+        // Navidrome drops the song on its next scan; one is asked for now rather than whenever.
+        if (outcome.State == Octo.Services.Library.LibraryActionState.Applied)
+            HttpContext.RequestServices.GetService<Octo.Services.Library.LibraryRescan>()?.Soon();
+        return _responseBuilder.CreateLibraryActionResponse(id, outcome);
+    }
+
+    /// <summary>
+    /// octoLibraryActions v3: change a song's file without removing it, or put a removed one back.
+    /// retag writes the tags sent (title, artist, album, albumArtist, year, genre, track, disc,
+    /// isrc; an empty one clears it), joinAlbum puts the song on the album of the song named by
+    /// <c>like</c>, cover puts a found cover inside a file that has none (<c>preview=true</c> only
+    /// says what was found), lookup finds the tags a download would get and writes nothing, undo
+    /// puts back the song's last change, and restore takes a removed song out of the trash. All of
+    /// them only for an admin on the allowed list; a dry run rehearses.
+    /// </summary>
+    private async Task<IActionResult> ApplyLibraryEdit(string id, string action, IReadOnlyDictionary<string, string> parameters)
+    {
+        var username = parameters.GetValueOrDefault("u");
+        var edits = HttpContext.RequestServices.GetService<Octo.Services.Library.LibraryEditService>();
+        var refusal = edits is null ? "This server cannot change library files." : edits.Refusal(username, await IsCallerAdminAsync(parameters));
+        if (refusal is not null)
+            return action == SubsonicResponseBuilder.LookupAction
+                ? _responseBuilder.CreateLookupResponse(id, new("skipped", refusal, new Dictionary<string, string?>(),
+                    new Dictionary<string, string?>(), null, null, null))
+                : _responseBuilder.CreateLibraryEditResponse(id, action, new("skipped", refusal));
+
+        // Not tied to the request either: a write that has started finishes.
+        var none = CancellationToken.None;
+        Octo.Services.Library.LibraryEditOutcome outcome;
+        switch (action)
+        {
+            case SubsonicResponseBuilder.LookupAction:
+                return _responseBuilder.CreateLookupResponse(id, await edits!.LookupAsync(id, HttpContext.RequestAborted));
+            case SubsonicResponseBuilder.RetagAction:
+                var changes = Octo.Services.Library.SongTagFields.All
+                    .Where(parameters.ContainsKey)
+                    .ToDictionary(field => field, field => (string?)parameters[field]);
+                outcome = await edits!.RetagAsync(id, username!, changes, none);
+                break;
+            case SubsonicResponseBuilder.JoinAlbumAction:
+                var like = parameters.GetValueOrDefault("like", "").Trim();
+                if (like.Length == 0) return _responseBuilder.CreateError("json", 10, "Required parameter is missing: like");
+                outcome = await edits!.JoinAlbumAsync(id, like, username!, none);
+                break;
+            case SubsonicResponseBuilder.CoverAction:
+                var preview = parameters.GetValueOrDefault("preview", "") is "true" or "1";
+                outcome = await edits!.AddCoverAsync(id, username!, preview, none);
+                break;
+            case SubsonicResponseBuilder.UndoAction:
+                outcome = await edits!.UndoAsync(id, username!, none);
+                break;
+            default:
+                outcome = await edits!.RestoreAsync(id, username!);
+                break;
+        }
+        _logger.LogInformation("Library {Action} for {Id} by {User} from the app: {State} - {Detail}",
+            action, id, username, outcome.State, outcome.Detail);
+        return _responseBuilder.CreateLibraryEditResponse(id, action, outcome);
+    }
+
+    /// <summary>
+    /// Whether the caller is one of Navidrome's admins, asked with their own sign-in. False when
+    /// Navidrome cannot say, so a change to the library's files is never allowed by an outage.
+    /// Asked every time: a role taken away counts at once, and it is one call to Navidrome.
+    /// </summary>
+    private async Task<bool> IsCallerAdminAsync(IReadOnlyDictionary<string, string> parameters)
+    {
+        var username = parameters.GetValueOrDefault("u");
+        if (string.IsNullOrWhiteSpace(username)) return false;
+        var auth = parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+        auth["f"] = "json";
+        auth["username"] = username;
+        var relay = await _proxyService.RelaySafeAsync("rest/getUser", auth);
+        if (!relay.Success || relay.Body is not { } body) return false;
+        var admin = false;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            admin = doc.RootElement.TryGetProperty("subsonic-response", out var root)
+                    && root.TryGetProperty("user", out var user)
+                    && user.TryGetProperty("adminRole", out var role)
+                    && role.ValueKind == System.Text.Json.JsonValueKind.True;
+        }
+        catch (System.Text.Json.JsonException) { return false; }
+        return admin;
+    }
+
+    /// <summary>
+    /// octoLibraryActions v2: queue a higher quality copy of one song, and answer at once. The same
+    /// gates as the Better quality playlist, read now so the app hears a reason straight away; the
+    /// executor checks them all again when the job runs. A job is listed in getUpgrades before this
+    /// answers "queued".
+    /// </summary>
+    private IActionResult QueueUpgrade(string id, string? username)
+    {
+        const string action = SubsonicResponseBuilder.UpgradeAction;
+        var refusal = UpgradeGate.Refusal(_libraryActionSettings.CurrentValue, username,
+            _libraryActions is not null && _upgradeQueue is not null, UpgradeReady, UpgradeSourceName);
+        if (refusal is not null) return _responseBuilder.CreateLibraryActionResponse(id, "skipped", refusal, action);
+
+        var (jobs, full) = _upgradeQueue!.Add([new Octo.Services.Library.UpgradeAsk(id)], username!, "app");
+        if (jobs.Count == 0) return _responseBuilder.CreateLibraryActionResponse(id, "skipped", full, action);
+        _logger.LogInformation("Higher quality for {Id} asked by {User} from the app: {State}", id, username, jobs[0].State);
+        return _responseBuilder.CreateLibraryActionResponse(id, "queued",
+            $"Looking for a higher quality copy on {UpgradeSourceName}.", action);
+    }
+
+    /// <summary>
+    /// Star ratings.
+    ///
+    /// Two jobs, in this order and never the other way round:
+    ///
+    /// 1. ALWAYS relay to Navidrome and return ITS response verbatim. A rating the server did
+    ///    not record snaps back in the client on the next refresh, and rating a track is a
+    ///    legitimate thing to do for its own sake. Octo reading meaning into it must never cost
+    ///    the user the rating itself.
+    /// 2. Only then, if library actions are on, the rating maps to an enabled action and the
+    ///    user is on the allowlist, queue it. Queue, not execute: nothing that removes a file
+    ///    runs inside a request.
+    ///
+    /// Before this there was no handler at all and setRating fell through to the catch-all,
+    /// where an Octo id became a synthetic OK that never reached Navidrome. That behaviour is
+    /// preserved exactly.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/setRating")]
+    [Route("rest/setRating.view")]
+    public async Task<IActionResult> SetRating()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var itemId = parameters.GetValueOrDefault("id", "");
+        var ratingText = parameters.GetValueOrDefault("rating", "");
+
+        // An external id is not a Navidrome song, and relaying one errors "data not found".
+        if (!string.IsNullOrEmpty(itemId) && _localLibraryService.ParseSongId(itemId).isExternal)
+        {
+            // Nothing to relay, so a ping is the auth check before the listener's radio changes.
+            if (_radioStateStore is not null && int.TryParse(ratingText, out var externalStars)
+                && parameters.GetValueOrDefault("u") is { Length: > 0 } externalRater)
+            {
+                var auth = parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+                auth.Remove("id");
+                auth.Remove("rating");
+                var check = await _proxyService.RelaySafeAsync("rest/ping", auth);
+                if (check.Success && check.Body is not null && IsSuccessfulSubsonicResponse(check.Body, format))
+                    await RecordRadioBanAsync(externalRater, itemId, externalStars, parameters);
+            }
+            return _responseBuilder.CreateResponse(format, "setRating", new { });
+        }
+
+        byte[] body;
+        string? contentType;
+        try
+        {
+            var result = await _proxyService.RelayAsync("rest/setRating", parameters);
+            (body, contentType) = (result.Body, result.ContentType);
+        }
+        catch (HttpRequestException ex)
+        {
+            return _responseBuilder.CreateError(format, 0, $"Error connecting to Subsonic server: {ex.Message}");
+        }
+
+        if (IsSuccessfulSubsonicResponse(body, format) && int.TryParse(ratingText, out var stars)
+            && parameters.GetValueOrDefault("u") is { Length: > 0 } rater && !string.IsNullOrEmpty(itemId))
+            await RecordRadioBanAsync(rater, itemId, stars, parameters);
+
+        if (_ratingActions is not null
+            && IsSuccessfulSubsonicResponse(body, format)
+            && int.TryParse(ratingText, out var rating)
+            && !string.IsNullOrEmpty(itemId)
+            && parameters.GetValueOrDefault("u") is { Length: > 0 } username
+            && parameters.GetValueOrDefault("t") is { Length: > 0 } token
+            && parameters.GetValueOrDefault("s") is { Length: > 0 } salt
+            && _libraryActionSettings.CurrentValue.ActionForRating(rating) is { } definition
+            && RatingInScope(username, itemId))
+        {
+            // Navidrome answered ok to a call carrying this u/t/s, which IS the auth check.
+            // Octo does not validate the password itself; it trusts it exactly as far as
+            // Navidrome just did, the same idiom getPlaylist and star already use.
+            _ratingActions.TryEnqueue(new Octo.Services.Library.RatingActionRequest(
+                definition.Action, itemId, username, username, token, salt));
+        }
+
+        return File(body, contentType ?? $"application/{format}");
+    }
+
+    /// <summary>
+    /// Whether a star is a command here. NoticeOnly: only on a track in one of Octo's notice
+    /// playlists, where the only reason to rate it is to answer (#47). Global: any track.
+    /// </summary>
+    private bool RatingInScope(string username, string itemId) =>
+        _libraryActionSettings.CurrentValue.EffectiveRatingsScope == LibraryRatingScope.Global
+        || (_noticeQueue?.IsQueued(username, itemId) ?? false);
+
+    /// <summary>
+    /// One star keeps a song off this listener's radio; any other rating lifts that. Never
+    /// fails the rating itself: the radio is a side effect of it.
+    /// </summary>
+    private async Task RecordRadioBanAsync(string username, string itemId, int stars,
+        IReadOnlyDictionary<string, string> parameters)
+    {
+        if (_radioStateStore is null) return;
+        try
+        {
+            var rated = await _radioTrackResolver.ResolveScrobbleAsync(itemId, parameters);
+            if (rated is not null)
+                _radioStateStore.SetRadioBan(username, itemId, rated.Artist, rated.Title, stars == 1);
+            if (stars == 1) _radioOutcomes?.Disliked(username, itemId, DateTime.UtcNow);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "radio ban for rating on {Id} failed", itemId);
         }
     }
 
@@ -1960,7 +3061,7 @@ public class SubsonicController : ControllerBase
         }
 
         // Check if Last.fm radio is configured and enabled
-        if (_lastFmService == null || !_lastFmService.IsRadioEnabled)
+        if (!_songRadio.Enabled)
         {
             _logger.LogDebug("Last.fm radio not configured, relaying to upstream server");
             try
@@ -1977,6 +3078,8 @@ public class SubsonicController : ControllerBase
         // Get the seed song metadata
         string artistName = "";
         string trackTitle = "";
+        Song? librarySeed = null;
+        string? seedVideo = null;
 
         var (isExternal, provider, externalId) = _localLibraryService.ParseSongId(id);
 
@@ -1989,84 +3092,63 @@ public class SubsonicController : ControllerBase
                 artistName = song.Artist ?? "";
                 trackTitle = song.Title;
             }
+            // An outside song already playing from YouTube names its video: its radio needs no search.
+            seedVideo = _idRegistry.Lookup(id)?.YouTubeId;
         }
         else
         {
-            // Local song - get metadata from Navidrome
-            try
+            // A library song, or an album or artist, which Subsonic's getSimilarSongs also takes.
+            // Read with the caller's own credentials, so it is their library being asked.
+            var seed = await _radioTrackResolver.ReadSeedAsync(id, parameters);
+            if (seed is null)
             {
-                // Build parameters with auth from original request
-                var getSongParams = new Dictionary<string, string>(parameters)
-                {
-                    ["id"] = id,
-                    ["f"] = "json"
-                };
-                var result = await _proxyService.RelayAsync("rest/getSong", getSongParams);
-
-                var json = System.Text.Encoding.UTF8.GetString(result.Body);
-                var doc = JsonDocument.Parse(json);
-
-                if (doc.RootElement.TryGetProperty("subsonic-response", out var response) &&
-                    response.TryGetProperty("song", out var songElement))
-                {
-                    artistName = songElement.TryGetProperty("artist", out var artist) ? artist.GetString() ?? "" : "";
-                    trackTitle = songElement.TryGetProperty("title", out var title) ? title.GetString() ?? "" : "";
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get song metadata for {Id}", id);
+                _logger.LogWarning("Could not read radio seed {Id} from Navidrome", id);
                 return _responseBuilder.CreateResponse(format, responseKey, new { });
             }
+            librarySeed = seed.Song;
+            artistName = seed.Artist;
+            trackTitle = seed.Song?.Title ?? "";
         }
 
-        if (string.IsNullOrEmpty(artistName) || string.IsNullOrEmpty(trackTitle))
+        if (string.IsNullOrEmpty(artistName) || (string.IsNullOrEmpty(trackTitle) && isExternal))
         {
             _logger.LogWarning("Could not get artist/title for song {Id}", id);
             return _responseBuilder.CreateResponse(format, responseKey, new { });
         }
 
-        // Strip collab/feature decoration so Last.fm finds the canonical artist.
-        var lookupArtist = LastFmRadioSeedNormalizer.Artist(artistName) ?? artistName;
-        var lookupTitle  = LastFmRadioSeedNormalizer.Title(trackTitle) ?? trackTitle;
-        _logger.LogInformation("Getting similar songs for {Artist} - {Title} (lookup: {LookA} - {LookT})",
-            artistName, trackTitle, lookupArtist, lookupTitle);
-
-        var similarTracks = await _lastFmService.GetSimilarTracksAsync(lookupArtist, lookupTitle, count);
-
-        if (similarTracks.Count == 0)
+        // Who the radio is for, once Navidrome has accepted their sign-in: a library seed was just
+        // read with it, an outside one is checked with a ping, as setRating does. Unchecked, the
+        // radio applies no one-star bans, uses the base weights and teaches nothing, so nobody can
+        // read or steer another listener's radio by naming them. Named as scrobbles name them.
+        var verified = !isExternal;
+        if (isExternal)
         {
-            _logger.LogInformation("No similar tracks found from Last.fm");
+            var auth = parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+            auth.Remove("id");
+            var check = await _proxyService.RelaySafeAsync("rest/ping", auth);
+            verified = check.Success && check.Body is not null && IsSuccessfulSubsonicResponse(check.Body, format);
+        }
+        var listener = verified
+            ? await _requestIdentity.UsernameAsync(parameters, _proxyService, HttpContext.RequestAborted)
+            : null;
+        var bans = listener is not null && _radioStateStore is not null
+            ? _radioStateStore.RadioBanKeys(listener)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var resolvedSongs = await _songRadio.BuildAsync(
+            new Octo.Services.Radio.RadioSeed(artistName, trackTitle, librarySeed?.Duration, librarySeed, seedVideo),
+            count, listener, parameters, bans, HttpContext.RequestAborted);
+        if (resolvedSongs.Count == 0)
+        {
+            // Nothing from Octo's sources (no Last.fm key, say, and an artist none of the others
+            // knows): Navidrome's own agents may still answer, as they did before Octo's radio.
+            if (!isExternal)
+            {
+                var upstream = await _proxyService.RelaySafeAsync(Request.Path.Value ?? "rest/getSimilarSongs", parameters);
+                if (upstream.Success && upstream.Body is { Length: > 0 })
+                    return File(upstream.Body, upstream.ContentType ?? $"application/{format}");
+            }
             return _responseBuilder.CreateResponse(format, responseKey, new { });
         }
-
-        _logger.LogInformation("Found {Count} similar tracks from Last.fm; building radio queue",
-            similarTracks.Count);
-
-        // For each Last.fm recommendation, prefer the local copy if we own it.
-        // Tracks the user already has play at full FLAC quality from Navidrome
-        // and avoid the yt-dlp roundtrip entirely. Lookups go in parallel
-        // against Navidrome — at 50ms each that's ~150ms total under a
-        // semaphore=10 cap, which fits comfortably inside Arpeggi's HTTP
-        // budget.
-        var sem = new SemaphoreSlim(10);
-        var resolveTasks = similarTracks.Take(count).Select(async track =>
-        {
-            await sem.WaitAsync();
-            try
-            {
-                return await _radioTrackResolver.ResolveAsync(
-                    track.Artist, track.Title, track.Duration, parameters);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "radio resolve failed for {Artist} - {Title}", track.Artist, track.Title);
-                return null;
-            }
-            finally { sem.Release(); }
-        }).ToList();
-        var resolvedSongs = (await Task.WhenAll(resolveTasks))
-            .Where(s => s != null).Cast<Song>().ToList();
 
         var localCount = resolvedSongs.Count(s => s.IsLocal);
         var externalCount = resolvedSongs.Count - localCount;
@@ -2129,8 +3211,9 @@ public class SubsonicController : ControllerBase
     /// we registered, fire-and-forget yt-dlp resolution for the next 8
     /// unresolved external songs so a fast-skip user always has 8 ready ahead.
     ///
-    /// We always relay to Navidrome too, because real scrobbling (last-played
-    /// stats, the Now Playing panel) is the upstream's job.
+    /// Library songs are relayed to Navidrome too, because real scrobbling
+    /// (last-played stats, the Now Playing panel) is the upstream's job. Outside
+    /// songs are not: Navidrome has no such media to record.
     /// </summary>
     [HttpGet, HttpPost]
     [Route("rest/scrobble")]
@@ -2155,14 +3238,35 @@ public class SubsonicController : ControllerBase
             }
         }
 
-        // Always pass through so Navidrome's last-played/Now Playing stays accurate.
+        // Library songs pass through so Navidrome's last-played/Now Playing stays accurate.
+        // An outside id is not Navidrome's: relayed, it logs "data not found" on every play
+        // and records nothing (#60). So only library ids go upstream, each keeping its
+        // own submission and time when the client sent one per id.
+        var library = Enumerable.Range(0, ids.Count)
+            .Where(index => !_localLibraryService.ParseSongId(ids[index]).isExternal).ToList();
+        // Times that do not pair up with the ids are dropped, not relayed. Navidrome refuses
+        // such a scrobble outright, and leaving the outside ids out could make the counts
+        // match by accident and pin an outside song's time on a library song.
+        if (times.Count > 0 && times.Count != ids.Count) times = [];
+        IEnumerable<string> LibraryOnly(IReadOnlyList<string> values) =>
+            values.Count == ids.Count ? library.Select(index => values[index]) : values;
         try
         {
             var relayParameters = parameters
                 .Where(pair => pair.Key is not ("id" or "submission" or "time")).ToList();
-            relayParameters.AddRange(ids.Select(value => new KeyValuePair<string, string>("id", value)));
-            relayParameters.AddRange(submissions.Select(value => new KeyValuePair<string, string>("submission", value)));
-            relayParameters.AddRange(times.Select(value => new KeyValuePair<string, string>("time", value)));
+            if (ids.Count > 0 && library.Count == 0)
+            {
+                // Nothing for Navidrome to record, but its answer was also the credential
+                // check that gates learning below. A ping checks the same credentials and
+                // answers in the very shape a scrobble does, failures included.
+                var check = await _proxyService.RelayAsync("rest/ping", relayParameters);
+                if (IsSuccessfulSubsonicResponse(check.Body, format))
+                    await LearnFromScrobblesAsync(ids, submissions, times, parameters);
+                return File(check.Body, check.ContentType ?? $"application/{format}");
+            }
+            relayParameters.AddRange(LibraryOnly(ids).Select(value => new KeyValuePair<string, string>("id", value)));
+            relayParameters.AddRange(LibraryOnly(submissions).Select(value => new KeyValuePair<string, string>("submission", value)));
+            relayParameters.AddRange(LibraryOnly(times).Select(value => new KeyValuePair<string, string>("time", value)));
             var result = await _proxyService.RelayAsync("rest/scrobble", relayParameters);
             if (IsSuccessfulSubsonicResponse(result.Body, format))
                 await LearnFromScrobblesAsync(ids, submissions, times, parameters);
@@ -2178,36 +3282,73 @@ public class SubsonicController : ControllerBase
 
     /// <summary>
     /// What a completed scrobble teaches: the radio profile (when personalised radio is
-    /// on) and, for an external track, the listener's ListenBrainz history. Navidrome
-    /// already scrobbles local tracks from the relayed call; an external id is unknown
-    /// to it, so without this the play is gone.
+    /// on), the listener's Last.fm history (outside songs, and library songs unless they are
+    /// left to Navidrome) and, for an external track, ListenBrainz. A start-of-play event
+    /// becomes Last.fm's Now Playing.
     /// </summary>
     private async Task LearnFromScrobblesAsync(IReadOnlyList<string> ids,
         IReadOnlyList<string> submissions, IReadOnlyList<string> times,
         IReadOnlyDictionary<string, string> authenticatedParameters)
     {
-        var username = authenticatedParameters.GetValueOrDefault("u", "").Trim();
-        if (username.Length == 0) return;
+        // Called only once Navidrome has accepted these credentials. An API key sign-in has no
+        // u, so its owner is asked of Navidrome; nobody to name means nothing is learned.
+        var username = await _requestIdentity.UsernameAsync(authenticatedParameters, _proxyService,
+            HttpContext.RequestAborted);
+        if (string.IsNullOrEmpty(username)) return;
+        // What radio learns: a song it suggested, started and then played through, or started and
+        // never finished. Before the early return below, so it works with stations off.
+        _radioOutcomes?.Observe(username, ids, submissions, DateTime.UtcNow);
         var learning = _radioStateStore is not null && _lastFmSettings.EnableRadio
             && _lastFmSettings.EnablePersonalizedStations;
         var submitting = _listenBrainz is not null && _listenBrainz.IsEnabledFor(username);
-        if (!learning && !submitting) return;
+        var scrobbling = _lastFmScrobbles is not null && _lastFmScrobbles.IsEnabledFor(username);
+        if (!learning && !submitting && !scrobbling) return;
         var recorded = false;
         for (var index = 0; index < ids.Count; index++)
         {
             // Explicit start/now-playing scrobbles are not completed plays. Clients that
-            // omit submission are accepted because many only send one credible event.
-            if (index < submissions.Count && !IsTrue(submissions[index])) continue;
+            // omit submission are accepted because many only send one credible event. One
+            // submission for several ids is for all of them, as Navidrome reads it.
+            var completed = submissions.Count == 1
+                ? IsTrue(submissions[0])
+                : index >= submissions.Count || IsTrue(submissions[index]);
+            // Last.fm hears about outside songs, and library songs too unless the admin left
+            // those to a Navidrome that scrobbles them itself (else they would count twice).
+            var outside = _localLibraryService.ParseSongId(ids[index]).isExternal;
+            var lastFmTakes = scrobbling && (outside || _lastFmScrobbles!.TakesLibraryPlays);
+            if (!completed && !lastFmTakes) continue;
+            // A client that sends the same completed play again is not playing it again.
+            var time = index < times.Count ? times[index] : null;
+            var reportedAt = DateTime.UtcNow;
+            if (completed && !_recentScrobbles.FirstReport(username, ids[index], time, reportedAt))
+            {
+                _logger.LogDebug("Scrobble of {Id} for {User} repeats one already learned from", ids[index], username);
+                continue;
+            }
+            // Until something has learned from the play, it is not taken: a song that could not
+            // be looked up this time is withdrawn, so the client's retry counts.
+            var taken = false;
             try
             {
                 var song = await _radioTrackResolver.ResolveScrobbleAsync(ids[index], authenticatedParameters);
-                if (song is null || song.Artist.Length == 0 || song.Title.Length == 0) continue;
+                if (song is null || song.Artist.Length == 0 || song.Title.Length == 0)
+                {
+                    if (completed) _recentScrobbles.Withdraw(username, ids[index], time, reportedAt);
+                    continue;
+                }
+                var track = new LastFmTrack(song.Artist, song.Title, song.Album, song.Duration);
+                if (!completed)
+                {
+                    if (lastFmTakes) _lastFmScrobbles!.NowPlaying(username, track);
+                    continue;
+                }
                 var playedAt = DateTime.UtcNow;
                 if (index < times.Count && long.TryParse(times[index], out var unix))
                 {
                     try { playedAt = DateTimeOffset.FromUnixTimeMilliseconds(unix).UtcDateTime; }
                     catch (ArgumentOutOfRangeException) { /* retain now */ }
                 }
+                taken = true;
                 if (learning)
                     recorded |= _radioStateStore!.RecordPlay(username, new LastFmRadioPlay
                     {
@@ -2215,17 +3356,31 @@ public class SubsonicController : ControllerBase
                         Album = song.Album, Genre = song.Genre, Duration = song.Duration,
                         IsLocal = song.IsLocal, PlayedAtUtc = playedAt, Source = "scrobble"
                     });
+                // Queued, not awaited: the client's answer never waits on Last.fm.
+                if (lastFmTakes)
+                    _lastFmScrobbles!.Scrobble(username, track, playedAt);
                 if (submitting && !song.IsLocal)
                     await _listenBrainz!.SubmitListenAsync(username, song.Artist, song.Title,
                         song.Album, song.Duration, playedAt, HttpContext.RequestAborted);
             }
-            catch (Exception ex) { _logger.LogDebug(ex, "Radio ignored unreadable scrobble {Id}", ids[index]); }
+            catch (Exception ex)
+            {
+                if (completed && !taken) _recentScrobbles.Withdraw(username, ids[index], time, reportedAt);
+                _logger.LogDebug(ex, "Radio ignored unreadable scrobble {Id}", ids[index]);
+            }
         }
         if (!learning || !recorded || _radioRefreshQueue is null) return;
-        var user = _radioStateStore.GetUser(username);
+        var user = _radioStateStore!.GetUser(username);
         if (LastFmRadioRefreshPolicy.ShouldRefreshAfterPlay(user, _lastFmSettings))
             _radioRefreshQueue.Enqueue(username);
     }
+
+    /// <summary>
+    /// Octo's own playlist ids: radio stations start "or", mixes "og". Navidrome's ids are 22
+    /// characters of base62 that start with 0 to 7, so neither can ever be one of them.
+    /// </summary>
+    private static bool IsOctoPlaylistId(string id) => id.Length == 22
+        && (id.StartsWith("or", StringComparison.Ordinal) || id.StartsWith("og", StringComparison.Ordinal));
 
     private static bool IsTrue(string value) => value.Equals("true", StringComparison.OrdinalIgnoreCase)
         || value == "1";
@@ -2343,10 +3498,22 @@ public class SubsonicController : ControllerBase
         return _responseBuilder.CreateError(format, 0, "Jukebox is not supported");
     }
 
-    // OpenSubsonic getLyricsBySongId — Feishin fetches this every time a song
-    // plays. External tracks have no lyrics in Navidrome, so it returned code 70
-    // "data not found" per play; return an empty-but-ok lyrics list instead.
-    // (Real synced lyrics from an open source like lrclib are a future add.)
+    /// <summary>A lyrics lookup made while a client waits: a slow or overloaded source costs
+    /// at most this, and the song simply shows no lyrics this time.</summary>
+    private static readonly TimeSpan InteractiveLyricsBudget = TimeSpan.FromSeconds(4);
+
+    // OpenSubsonic getLyricsBySongId. Feishin fetches this every time a song plays. An external
+    // track has no lyrics in Navidrome, so relaying one returned code 70 "data not found" per
+    // play; it now gets real lyrics when LYRICS_FETCH is on (#52), and an empty-but-ok list
+    // otherwise. A library song's own lyrics (what Navidrome has, in its tags or beside it) rank
+    // among the sources as "song": they are served when they win, and the live lookup's when it
+    // does, so a song whose tags hold line-timed lyrics still plays word-timed ones from a source
+    // above it, or from any source when word timing is preferred.
+    //
+    // A song someone pinned lyrics for (setLyricsChoice, or the dashboard) answers with those,
+    // for every client, found by the song's artist and title when its id has changed since; one
+    // set to "none" answers with none. Word cues go only to a client that asked with
+    // enhanced=true; anyone else gets the lines exactly as before.
     [HttpGet, HttpPost]
     [Route("rest/getLyricsBySongId")]
     [Route("rest/getLyricsBySongId.view")]
@@ -2355,24 +3522,351 @@ public class SubsonicController : ControllerBase
         var parameters = await ExtractAllParameters();
         var id = parameters.GetValueOrDefault("id", "");
         var format = parameters.GetValueOrDefault("f", "xml");
+        var enhanced = IsTrue(parameters.GetValueOrDefault("enhanced", ""));
         var (isExternal, _, _) = _localLibraryService.ParseSongId(id);
+        var fetching = _lyricsService is not null && _metadataSettings?.CurrentValue.FetchLyrics == true;
+        var pin = string.IsNullOrEmpty(id) ? null : _lyricsChoices?.PinFor(id);
 
         if (isExternal)
         {
-            if (format == "json")
-                return _responseBuilder.CreateJsonResponse(new Dictionary<string, object>
-                {
-                    ["status"] = "ok",
-                    ["version"] = "1.16.1",
-                    ["lyricsList"] = new { structuredLyrics = Array.Empty<object>() },
-                });
-            return _responseBuilder.CreateResponse(format, "lyricsList", new { });
+            var routing = _idRegistry.Lookup(id) ?? SoulseekMetadataService.TryDecodeExternalId(id);
+            string artist = routing is { HasArtistTitle: true } ? routing.Artist! : "";
+            string title = routing is { HasArtistTitle: true } ? routing.Title! : "";
+            pin ??= _lyricsChoices?.PinFor(id, artist, title);
+            if (pin is not null)
+                return _responseBuilder.CreateLyricsListResponse(format, pin.Lyrics, pin.Artist ?? artist, pin.Title ?? title, enhanced);
+
+            Octo.Services.Lyrics.LyricsResult? found = null;
+            var stillLooking = false;
+            if (fetching && routing is { HasArtistTitle: true })
+                (found, stillLooking) = await LiveLyricsAsync(artist, title, routing.Album, routing.Duration);
+            if (found is null && stillLooking && DrawsItsOwnMarks(parameters))
+                return StillLookingForLyrics(format);
+            return _responseBuilder.CreateLyricsListResponse(format, found, artist, title, enhanced);
         }
 
-        var relay = await _proxyService.RelaySafeAsync("rest/getLyricsBySongId", parameters);
+        // Asked with word cues whenever the answer is JSON, so how the song's own lyrics are timed
+        // is known; a client that did not ask gets them without (see WithoutCues).
+        var json = format.Equals("json", StringComparison.OrdinalIgnoreCase);
+        var asking = json && !enhanced
+            ? new Dictionary<string, string>(parameters) { ["enhanced"] = "true" }
+            : parameters;
+        var relay = await _proxyService.RelaySafeAsync("rest/getLyricsBySongId", asking);
         if (relay.Success && relay.Body != null)
-            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+        {
+            // Navidrome answering ok is also what says the caller may see this song.
+            var allowed = IsSuccessfulSubsonicResponse(relay.Body, format);
+            var own = json && allowed ? NavidromeLyricsTiming(relay.Body) : null;
+            var song = allowed && ((fetching && own is not null) || (pin is null && _lyricsChoices?.AnyPins == true))
+                ? await LibrarySongAsync(parameters, id)
+                : null;
+            pin ??= song is null ? null : _lyricsChoices?.PinFor(id, song.Artist, song.Title);
+            if (pin is not null && allowed)
+                return _responseBuilder.CreateLyricsListResponse(format, pin.Lyrics,
+                    pin.Artist ?? song?.Artist ?? "", pin.Title ?? song?.Title ?? "", enhanced);
+
+            // Read-only: nothing is written beside a file Octo did not download.
+            if (fetching && own is { } timing && song is not null)
+            {
+                var (found, stillLooking) = await LiveLyricsAsync(song.Artist, song.Title, song.Album, song.Duration, timing);
+                // The lookup ranked the song's own among the sources, so anything else it found won;
+                // only "instrumental" never outranks lyrics the song has.
+                if (found is { IsSongsOwn: false } && (timing == Octo.Services.Lyrics.LyricsTiming.None || !found.Instrumental))
+                    return _responseBuilder.CreateLyricsListResponse(format, found, song.Artist, song.Title, enhanced);
+                if (timing == Octo.Services.Lyrics.LyricsTiming.None && stillLooking && DrawsItsOwnMarks(parameters))
+                    return StillLookingForLyrics(format);
+            }
+            var body = json && !enhanced ? WithoutCues(relay.Body) : relay.Body;
+            return File(body, relay.ContentType ?? $"application/{format}");
+        }
         return _responseBuilder.CreateResponse(format, "lyricsList", new { });
+    }
+
+    /// <summary>
+    /// The legacy lyrics call, by artist and title, which older clients (DSub, Subsonic's own)
+    /// use. Navidrome answers for its own songs; when it has nothing, the same live lookup as
+    /// getLyricsBySongId fills in, as plain text, and a pin for that artist and title wins.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/getLyrics")]
+    [Route("rest/getLyrics.view")]
+    public async Task<IActionResult> GetLyrics()
+    {
+        var parameters = await ExtractAllParameters();
+        var format = parameters.GetValueOrDefault("f", "xml");
+        var artist = parameters.GetValueOrDefault("artist", "").Trim();
+        var title = parameters.GetValueOrDefault("title", "").Trim();
+
+        var relay = await _proxyService.RelaySafeAsync("rest/getLyrics", parameters);
+        if (!relay.Success || relay.Body is null)
+            return _responseBuilder.CreateError(format, 0, "Octo can't reach Navidrome");
+        if (!IsSuccessfulSubsonicResponse(relay.Body, format) || artist.Length == 0 || title.Length == 0)
+            return File(relay.Body, relay.ContentType ?? $"application/{format}");
+
+        if (_lyricsChoices?.PinFor(artist, title) is { } pin)
+            return _responseBuilder.CreateLyricsResponse(format, pin.Lyrics, artist, title);
+
+        var fetching = _lyricsService is not null && _metadataSettings?.CurrentValue.FetchLyrics == true;
+        if (fetching && HasNoLegacyLyrics(relay.Body, format)
+            && (await LiveLyricsAsync(artist, title, null, null)).Found is { } found)
+            return _responseBuilder.CreateLyricsResponse(format, found, artist, title);
+        return File(relay.Body, relay.ContentType ?? $"application/{format}");
+    }
+
+    private static bool HasNoLegacyLyrics(byte[] body, string format)
+    {
+        try
+        {
+            if (format.Equals("json", StringComparison.OrdinalIgnoreCase))
+                return string.IsNullOrWhiteSpace(JsonNode.Parse(body)?["subsonic-response"]?["lyrics"]?["value"]?.GetValue<string>());
+            var root = XDocument.Parse(Encoding.UTF8.GetString(body)).Root;
+            return string.IsNullOrWhiteSpace(root?.Elements().FirstOrDefault(element => element.Name.LocalName == "lyrics")?.Value);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>How long getLyricsCandidates may take: every source that is on, several
+    /// entries each, is a slower thing than playing a song, and a person is choosing.</summary>
+    private static readonly TimeSpan CandidatesBudget = TimeSpan.FromSeconds(12);
+
+    /// <summary>
+    /// octoLyrics v1: every lyrics entry the sources that are on hold for a song, for choosing
+    /// between them, with what the song is set to now. title and artist, when given, search
+    /// for those instead of the song's own tags, for a song that is tagged wrong. Always JSON.
+    /// Credentials are checked with a ping to Navidrome, as getAcquisitions checks them.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/getLyricsCandidates")]
+    [Route("rest/getLyricsCandidates.view")]
+    public async Task<IActionResult> GetLyricsCandidates()
+    {
+        var parameters = await ExtractAllParameters();
+        const string format = "json";
+        if (await CheckCallerAsync(parameters) is { } refused) return refused;
+        if (_lyricsChoices is null || _lyricsService is null || _metadataSettings?.CurrentValue.FetchLyrics != true)
+            return _responseBuilder.CreateError(format, 0, "Lyrics lookups are off on this server");
+
+        var id = parameters.GetValueOrDefault("id", "");
+        if (string.IsNullOrWhiteSpace(id)) return _responseBuilder.CreateError(format, 10, "Required parameter is missing: id");
+        if (await SongForLyricsAsync(parameters, id) is not { } song)
+            return _responseBuilder.CreateError(format, 70, "Song not found");
+
+        var artist = parameters.GetValueOrDefault("artist", "").Trim() is { Length: > 0 } a ? a : song.Artist;
+        var title = parameters.GetValueOrDefault("title", "").Trim() is { Length: > 0 } t ? t : song.Title;
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+        budget.CancelAfter(CandidatesBudget);
+        var candidates = await _lyricsChoices.CandidatesAsync(new Octo.Services.Lyrics.LyricsQuery(
+            artist, Octo.Services.Lyrics.LyricsText.QueryTitle(title, artist), song.Album, song.Duration), budget.Token);
+        return _responseBuilder.CreateLyricsCandidatesResponse(id, _lyricsChoices.ChoiceFor(id, song.Artist, song.Title), candidates);
+    }
+
+    /// <summary>
+    /// octoLyrics v1: set a song's lyrics to one candidate from getLyricsCandidates, to "none"
+    /// to show no lyrics, or to "auto" to go back to finding them. The choice is the server's,
+    /// so every client and every user sees it, and getLyricsBySongId and getLyrics honour it.
+    /// </summary>
+    [HttpGet, HttpPost]
+    [Route("rest/setLyricsChoice")]
+    [Route("rest/setLyricsChoice.view")]
+    public async Task<IActionResult> SetLyricsChoice()
+    {
+        var parameters = await ExtractAllParameters();
+        const string format = "json";
+        if (await CheckCallerAsync(parameters) is { } refused) return refused;
+        if (_lyricsChoices is null) return _responseBuilder.CreateError(format, 0, "Lyrics are off on this server");
+
+        var id = parameters.GetValueOrDefault("id", "");
+        var candidate = parameters.GetValueOrDefault("candidate", "").Trim();
+        if (string.IsNullOrWhiteSpace(id) || candidate.Length == 0)
+            return _responseBuilder.CreateError(format, 10, "Required parameter is missing: id and candidate");
+
+        var who = NativeUsername(parameters);
+        var song = await SongForLyricsAsync(parameters, id);
+        if (candidate.Equals(Octo.Services.Lyrics.LyricsPin.Auto, StringComparison.OrdinalIgnoreCase))
+        {
+            _lyricsChoices.Clear(id, song?.Artist, song?.Title);
+            return _responseBuilder.CreateLyricsChoiceResponse(id, Octo.Services.Lyrics.LyricsPin.Auto);
+        }
+
+        if (song is null) return _responseBuilder.CreateError(format, 70, "Song not found");
+        if (candidate.Equals(Octo.Services.Lyrics.LyricsPin.Hidden, StringComparison.OrdinalIgnoreCase))
+        {
+            _lyricsChoices.Hide(id, song.Artist, song.Title, who);
+            return _responseBuilder.CreateLyricsChoiceResponse(id, Octo.Services.Lyrics.LyricsPin.Hidden);
+        }
+
+        if (_metadataSettings?.CurrentValue.FetchLyrics != true)
+            return _responseBuilder.CreateError(format, 0, "Lyrics lookups are off on this server");
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+        budget.CancelAfter(CandidatesBudget);
+        if (!await _lyricsChoices.PinAsync(id, candidate, song.Artist, song.Title, who, budget.Token))
+            return _responseBuilder.CreateError(format, 70, "Those lyrics could not be found; ask for the candidates again");
+        return _responseBuilder.CreateLyricsChoiceResponse(id, candidate);
+    }
+
+    /// <summary>Null when Navidrome accepts the caller's credentials, or the error to send.</summary>
+    private async Task<IActionResult?> CheckCallerAsync(IReadOnlyDictionary<string, string> parameters)
+    {
+        var auth = parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+        auth["f"] = "json";
+        var check = await _proxyService.RelaySafeAsync("rest/ping", auth);
+        if (!check.Success || check.Body is null)
+            return _responseBuilder.CreateError("json", 0, "Octo can't reach Navidrome to check who is asking");
+        if (!IsSuccessfulSubsonicResponse(check.Body, "json"))
+            return _responseBuilder.CreateError("json", 40, "Wrong username or password");
+        return null;
+    }
+
+    /// <summary>
+    /// Null when Navidrome accepts the request's sign-in, else the error to answer with, in the
+    /// format asked for. An outage refuses too: an outside song is Octo fetching from the
+    /// internet for whoever asks, and a broken Navidrome must not make that anyone at all.
+    /// </summary>
+    private async Task<IActionResult?> RefuseUnlessSignedInAsync(
+        IReadOnlyDictionary<string, string> parameters, string format)
+    {
+        var verdict = await _credentialCheck.CheckAsync(SubsonicCredential.From(parameters),
+            _proxyService, HttpContext.RequestAborted);
+        return verdict switch
+        {
+            CredentialVerdict.Accepted => null,
+            CredentialVerdict.Unreachable =>
+                _responseBuilder.CreateError(format, 0, "Octo can't reach Navidrome to check who is asking"),
+            _ => _responseBuilder.CreateError(format, 40, "Wrong username or password"),
+        };
+    }
+
+    /// <summary>Who an accepted request signed in as: u, or its API key's owner as Navidrome
+    /// names it, else the native token's name. Ask only after the sign-in is accepted.</summary>
+    private async Task<string> SignedInUserAsync(IReadOnlyDictionary<string, string> parameters) =>
+        await _requestIdentity.UsernameAsync(parameters, _proxyService, HttpContext.RequestAborted)
+        ?? NativeUsername(parameters);
+
+    /// <summary>What lyrics are looked up by, for an outside song from the registry and for a
+    /// library song from Navidrome as the caller sees it.</summary>
+    private async Task<Song?> SongForLyricsAsync(IReadOnlyDictionary<string, string> parameters, string id)
+    {
+        var (isExternal, _, _) = _localLibraryService.ParseSongId(id);
+        if (!isExternal) return await LibrarySongAsync(parameters, id);
+        var routing = _idRegistry.Lookup(id) ?? SoulseekMetadataService.TryDecodeExternalId(id);
+        return routing is { HasArtistTitle: true }
+            ? new Song { Artist = routing.Artist!, Title = routing.Title!, Album = routing.Album ?? "", Duration = routing.Duration }
+            : null;
+    }
+
+    /// <summary>
+    /// Lyrics for a song as it plays, within the interactive budget. A lookup that runs out of
+    /// time keeps going in the background (up to <see cref="BackgroundLyricsLimit"/>), so the
+    /// service has the answer cached for the next ask; the caller learns it is still looking.
+    /// </summary>
+    private async Task<(Octo.Services.Lyrics.LyricsResult? Found, bool StillLooking)> LiveLyricsAsync(
+        string artist, string title, string? album, int? duration,
+        Octo.Services.Lyrics.LyricsTiming songsOwn = Octo.Services.Lyrics.LyricsTiming.None)
+    {
+        var query = new Octo.Services.Lyrics.LyricsQuery(
+            artist, Octo.Services.Lyrics.LyricsText.QueryTitle(title, artist), album, duration);
+        // Not tied to the request: a client that stops waiting must not stop the lookup.
+        var limit = new CancellationTokenSource(BackgroundLyricsLimit);
+        var lookup = _lyricsService!.FindAsync(query, limit.Token, songsOwn);
+        _ = lookup.ContinueWith(_ => limit.Dispose(), TaskScheduler.Default);
+        try
+        {
+            var done = await Task.WhenAny(lookup, Task.Delay(InteractiveLyricsBudget, HttpContext.RequestAborted));
+            if (done != lookup) return (null, true);
+            var answer = await lookup;
+            return (answer.Result, answer.Result is null && answer.Transient);
+        }
+        catch (OperationCanceledException)
+        {
+            return (null, true);
+        }
+    }
+
+    /// <summary>How long a lookup the caller stopped waiting for may keep going.</summary>
+    private static readonly TimeSpan BackgroundLyricsLimit = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Told only to the Octo app: the lookup is not finished, so this is "not yet", never "none".
+    /// Other clients keep getting the ordinary empty list, which is what the spec gives them.
+    /// </summary>
+    private IActionResult StillLookingForLyrics(string format) =>
+        _responseBuilder.CreateError(format, 0, "Still looking for lyrics; ask again shortly");
+
+    /// <summary>
+    /// How the lyrics Navidrome sent are timed, the best entry's: word cues, timed lines, plain,
+    /// or None when it has none. Null when the answer is not one Octo can read.
+    /// </summary>
+    internal static Octo.Services.Lyrics.LyricsTiming? NavidromeLyricsTiming(byte[] body)
+    {
+        try
+        {
+            var lyrics = JsonNode.Parse(body)?["subsonic-response"]?["lyricsList"]?["structuredLyrics"];
+            if (lyrics is null) return Octo.Services.Lyrics.LyricsTiming.None;
+            if (lyrics is not JsonArray entries) return null;
+            var best = Octo.Services.Lyrics.LyricsTiming.None;
+            foreach (var entry in entries)
+            {
+                if (entry?["line"] is not JsonArray { Count: > 0 }) continue;
+                var timing = entry["cueLine"] is JsonArray { Count: > 0 } ? Octo.Services.Lyrics.LyricsTiming.Word
+                    : entry["synced"]?.GetValueKind() == JsonValueKind.True ? Octo.Services.Lyrics.LyricsTiming.Line
+                    : Octo.Services.Lyrics.LyricsTiming.Plain;
+                if (timing > best) best = timing;
+            }
+            return best;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Navidrome's lyrics as a client that did not ask for word cues gets them: without
+    /// the cue lines and the kind that came with them. Unchanged when they cannot be read.</summary>
+    internal static byte[] WithoutCues(byte[] body)
+    {
+        try
+        {
+            var root = JsonNode.Parse(body);
+            if (root?["subsonic-response"]?["lyricsList"]?["structuredLyrics"] is not JsonArray entries) return body;
+            var changed = false;
+            foreach (var entry in entries.OfType<JsonObject>())
+                changed |= entry.Remove("cueLine") | entry.Remove("kind");
+            return changed ? Encoding.UTF8.GetBytes(root.ToJsonString()) : body;
+        }
+        catch
+        {
+            return body;
+        }
+    }
+
+    /// <summary>Artist, title, album and length of a library song, asked as the calling user.</summary>
+    private async Task<Song?> LibrarySongAsync(IReadOnlyDictionary<string, string> parameters, string id)
+    {
+        var request = parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+        request["id"] = id;
+        request["f"] = "json";
+        var relay = await _proxyService.RelaySafeAsync("rest/getSong", request);
+        if (!relay.Success || relay.Body is null) return null;
+        try
+        {
+            var song = JsonNode.Parse(relay.Body)?["subsonic-response"]?["song"];
+            var artist = song?["artist"]?.GetValue<string>();
+            var title = song?["title"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title)) return null;
+            return new Song
+            {
+                Artist = artist, Title = title,
+                Album = song?["album"]?.GetValue<string>() ?? "",
+                Duration = song?["duration"]?.GetValue<int>(),
+            };
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     // Album/artist "info" panels. For external tracks these used to fall through
@@ -2442,8 +3936,16 @@ public class SubsonicController : ControllerBase
     }
 
     [Route("{**endpoint}")]
-    public async Task<IActionResult> GenericEndpoint(string endpoint)
+    public async Task<IActionResult> GenericEndpoint(string? endpoint)
     {
+        // The bare address binds no endpoint at all. Required by [ApiController], that null was
+        // a 400 before any of this ran, and Amperfy checks the server address before signing in
+        // (#80). Navidrome answers it with its web app, so Octo does too; relative, so a reverse
+        // proxy's path prefix is kept.
+        endpoint ??= "";
+        if (endpoint.Length == 0 && (HttpMethods.IsGet(Request.Method) || HttpMethods.IsHead(Request.Method)))
+            return Redirect("app/");
+
         if (IsOctoOwnedPath(endpoint))
         {
             return NotFound();
@@ -2484,6 +3986,13 @@ public class SubsonicController : ControllerBase
         // song case above: HasExternalId can't see an id carried in the path.
         var nativeAlbum = await TryServeNativeExternalAlbumAsync(endpoint);
         if (nativeAlbum != null) return nativeAlbum;
+
+        // Native artist page for an outside artist: the artist (id in the path again) and
+        // its albums, which the client asks for by artist_id, a key HasExternalId never reads.
+        var nativeArtist = await TryServeNativeExternalArtistAsync(endpoint);
+        if (nativeArtist != null) return nativeArtist;
+        var nativeArtistAlbums = await TryServeNativeArtistAlbumsAsync(endpoint, parameters);
+        if (nativeArtistAlbums != null) return nativeArtistAlbums;
 
         // Native album search, the twin of the search3 album injection.
         var nativeAlbumSearch = await TryInjectNativeAlbumSearchAsync(endpoint, parameters);
@@ -2543,10 +4052,10 @@ public class SubsonicController : ControllerBase
 
         var tail = endpoint.Length == prefix.Length ? "" : endpoint[(prefix.Length + 1)..].Trim('/');
         var id = tail.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
-        var reserved = id.StartsWith("or", StringComparison.Ordinal) && id.Length == 22;
+        var reserved = IsOctoPlaylistId(id);
         if (reserved && !HttpMethods.IsGet(Request.Method))
             return StatusCode(StatusCodes.Status405MethodNotAllowed,
-                new { error = "Octo Radio stations are read-only" });
+                new { error = "Octo's generated playlists are read-only" });
         if (tail.Length > 0 && !reserved) return null;
 
         // A successful upstream list validates the native bearer token before Octo
@@ -2596,6 +4105,7 @@ public class SubsonicController : ControllerBase
         if (tail.EndsWith("/tracks", StringComparison.OrdinalIgnoreCase))
         {
             var songs = await MaterializeStationAsync(stationMatch, parameters);
+            _metadataService.CompleteSongLengths(songs);
             _radioQueueStore.Register(songs.Select(song => song.Id));
             _ = _metadataService.PrewarmYouTubeIdsAsync(songs, 8);
             var start = Math.Max(0, parameters.TryGetValue("_start", out var startText)
@@ -2609,6 +4119,32 @@ public class SubsonicController : ControllerBase
         }
         return File(Encoding.UTF8.GetBytes(NativeStation(stationMatch).ToJsonString()), "application/json");
     }
+
+    /// <summary>
+    /// The user to attribute an acquisition to, or null when attribution is off.
+    ///
+    /// Gated here rather than at the history write, so with the setting off no username is
+    /// captured in the first place and nothing downstream is ever holding one.
+    /// </summary>
+    private string? RequesterFor(string? username) =>
+        _subsonicSettings.RecordRequestedBy && !string.IsNullOrWhiteSpace(username) ? username : null;
+
+    /// <summary>
+    /// The sign-in to favorite a hearted outside song or album with, or null. Held for every
+    /// heart from another app, not only while downloads are favorited: a song that turns out to
+    /// be in the library already is always that person's favorite. Octo's own apps send star for
+    /// Add, which asks for a copy and not a favorite.
+    /// </summary>
+    private SubsonicCredential? FavoriteCredential(IReadOnlyDictionary<string, string> parameters) =>
+        _starOnArrival is not null && !StarOnArrival.IsOctoApp(parameters.GetValueOrDefault("c"))
+            ? SubsonicCredential.From(parameters) : null;
+
+    /// <summary>No Range, or a Range from byte 0, starts a track. A HEAD plays nothing; the
+    /// route does not take HEAD today, and this keeps it that way if it ever does.</summary>
+    internal static bool IsFirstByteRequest(string method, string? range) =>
+        !HttpMethods.IsHead(method)
+        && (string.IsNullOrWhiteSpace(range)
+            || range.TrimStart().StartsWith("bytes=0-", StringComparison.OrdinalIgnoreCase));
 
     private string NativeUsername(IReadOnlyDictionary<string, string> parameters)
     {
@@ -2871,20 +4407,22 @@ public class SubsonicController : ControllerBase
             && int.TryParse(lib.ToString(), out var parsedLib))
             libraryId = parsedLib;
 
-        // Don't inject an album the library already returned.
-        var localKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Don't inject an album the library already returned. The key is the one search3's
+        // merge uses, so a title the catalog spells with a curly apostrophe or an accent the
+        // library's tags lack is still the same album.
+        var localKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var node in realArr)
         {
             if (node is not JsonObject o) continue;
             var name = o.TryGetPropertyValue("name", out var n) ? n?.ToString() : null;
             var aa = o.TryGetPropertyValue("albumArtist", out var v) ? v?.ToString() : null;
-            if (!string.IsNullOrWhiteSpace(name)) localKeys.Add($"{aa?.Trim()}|{name.Trim()}");
+            if (SubsonicModelMapper.AlbumKey(aa, name) is string key) localKeys.Add(key);
         }
 
         var added = 0;
         foreach (var album in externalAlbums)
         {
-            if (localKeys.Contains($"{album.Artist?.Trim()}|{album.Title?.Trim()}")) continue;
+            if (SubsonicModelMapper.AlbumKey(album.Artist, album.Title) is string key && localKeys.Contains(key)) continue;
             realArr.Add(BuildNativeAlbumObject(album, libraryId));
             added++;
         }
@@ -2955,6 +4493,122 @@ public class SubsonicController : ControllerBase
     }
 
     /// <summary>
+    /// Native artist detail: GET /api/artist/{id} for one of Octo's artist ids. A
+    /// Navidrome-mode client opens an artist page with this. Relayed, Navidrome has no such
+    /// artist, the relay fails, and the page waits forever. A library artist falls through.
+    /// </summary>
+    private async Task<IActionResult?> TryServeNativeExternalArtistAsync(string endpoint)
+    {
+        const string prefix = "api/artist/";
+        if (!endpoint.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        var id = endpoint[prefix.Length..].Trim('/');
+        if (string.IsNullOrEmpty(id) || id.Contains('/')) return null; // leaf id only
+
+        if (_idRegistry.Lookup(id)?.Kind != RoutingKind.Artist) return null;
+
+        var artist = await _metadataService.GetArtistAsync(SoulseekMetadataService.ProviderName, id);
+        if (artist == null) return null;
+        // The counts come from the same list the page shows, so they agree with it. Only the
+        // track counts already known: the page asks for that list at the same moment, and
+        // that request is the one that asks the catalog for the rest.
+        var albums = await OutsideArtistAlbumsAsync(id, artist.Name, knownCountsOnly: true);
+
+        var bytes = Encoding.UTF8.GetBytes(BuildNativeArtistObject(artist, albums).ToJsonString());
+        Response.StatusCode = 200;
+        Response.ContentType = "application/json";
+        await Response.Body.WriteAsync(bytes);
+        return new EmptyResult();
+    }
+
+    /// <summary>
+    /// Native albums by artist: GET /api/album?artist_id={outside artist id}, the list an
+    /// artist page shows. The rows are the same albums getArtist lists for that artist.
+    /// </summary>
+    private async Task<IActionResult?> TryServeNativeArtistAlbumsAsync(
+        string endpoint, Dictionary<string, string> parameters)
+    {
+        if (!string.Equals(endpoint, "api/album", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var artistId = parameters.GetValueOrDefault("artist_id", "").Trim();
+        if (string.IsNullOrEmpty(artistId)) return null;
+        var routing = _idRegistry.Lookup(artistId);
+        if (routing?.Kind != RoutingKind.Artist) return null;
+
+        var albums = await OutsideArtistAlbumsAsync(artistId, routing.Artist ?? "");
+
+        // Feishin asks for a whole discography with _end=-1, so an end that is not past the
+        // start means the rest of the list rather than nothing.
+        var start = parameters.TryGetValue("_start", out var startStr)
+            && int.TryParse(startStr, out var s) && s > 0 ? Math.Min(s, albums.Count) : 0;
+        var end = parameters.TryGetValue("_end", out var endStr)
+            && int.TryParse(endStr, out var e) && e > start ? Math.Min(e, albums.Count) : albums.Count;
+
+        var arr = new JsonArray();
+        foreach (var album in albums.Skip(start).Take(end - start))
+            arr.Add(BuildNativeAlbumObject(album, 1));
+
+        var bytes = Encoding.UTF8.GetBytes(arr.ToJsonString());
+        Response.StatusCode = 200;
+        Response.Headers["X-Total-Count"] = albums.Count.ToString();
+        Response.ContentType = "application/json";
+        await Response.Body.WriteAsync(bytes);
+        return new EmptyResult();
+    }
+
+    /// <summary>
+    /// An outside artist's albums, each naming the artist and linking back to the artist's
+    /// own id, as getArtist fills them: the catalog's listing carries neither.
+    /// </summary>
+    private async Task<List<Album>> OutsideArtistAlbumsAsync(string artistId, string artistName,
+        bool knownCountsOnly = false)
+    {
+        var albums = knownCountsOnly
+            ? await _metadataService.GetArtistAlbumsKnownCountsAsync(SoulseekMetadataService.ProviderName, artistId)
+            : await _metadataService.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, artistId);
+        foreach (var album in albums)
+        {
+            if (string.IsNullOrEmpty(album.Artist)) album.Artist = artistName;
+            if (string.IsNullOrEmpty(album.ArtistId)) album.ArtistId = artistId;
+        }
+        return albums;
+    }
+
+    /// <summary>
+    /// Serializes one outside Artist into Navidrome's native artist JSON shape. Counts go
+    /// out both flat (older Navidrome) and under "stats" by role (newer Navidrome), since
+    /// clients read one or the other. The image URLs are the three getArtistInfo2 gives; a
+    /// client that draws the artist through getCoverArt with the id is served by Octo too.
+    /// </summary>
+    private static JsonObject BuildNativeArtistObject(Artist artist, IReadOnlyList<Album> albums)
+    {
+        var songCount = albums.Sum(a => a.SongCount ?? 0);
+        JsonObject Stats() => new() { ["albumCount"] = albums.Count, ["songCount"] = songCount, ["size"] = 0 };
+
+        var o = new JsonObject
+        {
+            ["id"] = artist.Id,
+            ["name"] = artist.Name,
+            ["albumCount"] = albums.Count,
+            ["songCount"] = songCount,
+            ["size"] = 0,
+            ["stats"] = new JsonObject { ["albumartist"] = Stats(), ["artist"] = Stats() },
+            ["playCount"] = 0,
+            ["missing"] = false,
+            // Fixed old timestamp, same reasoning as BuildNativeSongObject.
+            ["createdAt"] = "2020-01-01T00:00:00Z",
+            ["updatedAt"] = "2020-01-01T00:00:00Z",
+        };
+        if (!string.IsNullOrEmpty(artist.ImageUrl))
+        {
+            o["smallImageUrl"] = artist.ImageUrl;
+            o["mediumImageUrl"] = artist.ImageUrl;
+            o["largeImageUrl"] = artist.ImageUrl;
+        }
+        return o;
+    }
+
+    /// <summary>
     /// Serializes one external Album into Navidrome's native album JSON shape.
     /// Note Navidrome's album model has NO "artist"/"artistId" field — it uses
     /// albumArtist/albumArtistId — and "duration" is seconds as a float.
@@ -2987,6 +4641,16 @@ public class SubsonicController : ControllerBase
             ["updatedAt"] = "2020-01-01T00:00:00Z",
         };
         if (!string.IsNullOrEmpty(a.Genre)) o["genre"] = a.Genre;
+        // Navidrome's own album JSON carries the release types among its tags, in the tag's
+        // lowercase words, and a Navidrome-mode client groups an artist's page by them.
+        if (a.ReleaseTypes.Count > 0)
+        {
+            o["tags"] = new JsonObject
+            {
+                ["releasetype"] = new JsonArray(a.ReleaseTypes
+                    .Select(type => (JsonNode?)JsonValue.Create(type.ToLowerInvariant())).ToArray()),
+            };
+        }
         return o;
     }
 

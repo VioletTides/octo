@@ -1,0 +1,1000 @@
+{
+  "about": [
+    "Reference values for crates/octo-core/src/common/fuzzy.rs, made with the rapidfuzz Python package 3.9.7 (fuzz.ratio, fuzz.token_sort_ratio, fuzz.token_set_ratio divided by 100, and JaroWinkler.normalized_similarity with prefix weight 0.1).",
+    "Inputs are compared as given, with no processor. The Rust functions must agree within 0.001."
+  ],
+  "pairs": [
+    {
+      "a": "",
+      "b": "",
+      "ratio": 1.0,
+      "tokenSort": 1.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 1.0
+    },
+    {
+      "a": "",
+      "b": "abc",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "abc",
+      "b": "",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "a",
+      "b": "a",
+      "ratio": 1.0,
+      "tokenSort": 1.0,
+      "tokenSet": 1.0,
+      "jaroWinkler": 1.0
+    },
+    {
+      "a": "a",
+      "b": "b",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0.0
+    },
+    {
+      "a": "believer",
+      "b": "beleiver",
+      "ratio": 0.875,
+      "tokenSort": 0.875,
+      "tokenSet": 0.875,
+      "jaroWinkler": 0.970833
+    },
+    {
+      "a": "believer",
+      "b": "believe",
+      "ratio": 0.933333,
+      "tokenSort": 0.933333,
+      "tokenSet": 0.933333,
+      "jaroWinkler": 0.975
+    },
+    {
+      "a": "mine",
+      "b": "mind",
+      "ratio": 0.75,
+      "tokenSort": 0.75,
+      "tokenSet": 0.75,
+      "jaroWinkler": 0.883333
+    },
+    {
+      "a": "angel",
+      "b": "angels",
+      "ratio": 0.909091,
+      "tokenSort": 0.909091,
+      "tokenSet": 0.909091,
+      "jaroWinkler": 0.966667
+    },
+    {
+      "a": "part1",
+      "b": "part2",
+      "ratio": 0.8,
+      "tokenSort": 0.8,
+      "tokenSet": 0.8,
+      "jaroWinkler": 0.92
+    },
+    {
+      "a": "part 1",
+      "b": "part 2",
+      "ratio": 0.833333,
+      "tokenSort": 0.833333,
+      "tokenSet": 0.833333,
+      "jaroWinkler": 0.933333
+    },
+    {
+      "a": "luis fonsi",
+      "b": "fonsi luis",
+      "ratio": 0.5,
+      "tokenSort": 1.0,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.533333
+    },
+    {
+      "a": "fonsi, luis",
+      "b": "luis fonsi",
+      "ratio": 0.47619,
+      "tokenSort": 0.952381,
+      "tokenSet": 0.952381,
+      "jaroWinkler": 0.518182
+    },
+    {
+      "a": "fonsiluis",
+      "b": "luisfonsi",
+      "ratio": 0.555556,
+      "tokenSort": 0.555556,
+      "tokenSet": 0.555556,
+      "jaroWinkler": 0.462963
+    },
+    {
+      "a": "luis fonsi daddy yankee",
+      "b": "luis fonsi",
+      "ratio": 0.606061,
+      "tokenSort": 0.606061,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.886957
+    },
+    {
+      "a": "despacito remix",
+      "b": "despacito",
+      "ratio": 0.75,
+      "tokenSort": 0.75,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.92
+    },
+    {
+      "a": "the beatles",
+      "b": "beatles",
+      "ratio": 0.777778,
+      "tokenSort": 0.777778,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.78355
+    },
+    {
+      "a": "hello world",
+      "b": "world hello",
+      "ratio": 0.454545,
+      "tokenSort": 1.0,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.50303
+    },
+    {
+      "a": "new york new york",
+      "b": "new york",
+      "ratio": 0.64,
+      "tokenSort": 0.64,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.894118
+    },
+    {
+      "a": "a b c",
+      "b": "c b a",
+      "ratio": 0.6,
+      "tokenSort": 1.0,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.733333
+    },
+    {
+      "a": "a b c d",
+      "b": "a b x y",
+      "ratio": 0.714286,
+      "tokenSort": 0.714286,
+      "tokenSet": 0.714286,
+      "jaroWinkler": 0.885714
+    },
+    {
+      "a": "one two",
+      "b": "three four",
+      "ratio": 0.352941,
+      "tokenSort": 0.352941,
+      "tokenSet": 0.352941,
+      "jaroWinkler": 0.57381
+    },
+    {
+      "a": "bohemian rhapsody",
+      "b": "bohemianrhapsody",
+      "ratio": 0.969697,
+      "tokenSort": 0.969697,
+      "tokenSet": 0.969697,
+      "jaroWinkler": 0.988235
+    },
+    {
+      "a": "bohemian rhapsody",
+      "b": "bohemian rapsody",
+      "ratio": 0.969697,
+      "tokenSort": 0.969697,
+      "tokenSet": 0.969697,
+      "jaroWinkler": 0.988235
+    },
+    {
+      "a": "kamin",
+      "b": "камин",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "камин",
+      "b": "камин",
+      "ratio": 1.0,
+      "tokenSort": 1.0,
+      "tokenSet": 1.0,
+      "jaroWinkler": 1.0
+    },
+    {
+      "a": "камин",
+      "b": "камни",
+      "ratio": 0.8,
+      "tokenSort": 0.8,
+      "tokenSet": 0.8,
+      "jaroWinkler": 0.953333
+    },
+    {
+      "a": "neshar bojha",
+      "b": "nesharbojha",
+      "ratio": 0.956522,
+      "tokenSort": 0.521739,
+      "tokenSet": 0.521739,
+      "jaroWinkler": 0.983333
+    },
+    {
+      "a": "নেশার বোঝা",
+      "b": "নেশার বোঝা",
+      "ratio": 1.0,
+      "tokenSort": 1.0,
+      "tokenSet": 1.0,
+      "jaroWinkler": 1.0
+    },
+    {
+      "a": "紅蓮華",
+      "b": "gurenge",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "紅蓮華",
+      "b": "红莲华",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "周杰伦",
+      "b": "jay chou",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "周杰伦",
+      "b": "周杰倫",
+      "ratio": 0.666667,
+      "tokenSort": 0.666667,
+      "tokenSet": 0.666667,
+      "jaroWinkler": 0.822222
+    },
+    {
+      "a": "夜に駆ける",
+      "b": "yoru ni kakeru",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "사랑",
+      "b": "salang",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "ελλάδα",
+      "b": "ellada",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "café",
+      "b": "cafe",
+      "ratio": 0.75,
+      "tokenSort": 0.75,
+      "tokenSet": 0.75,
+      "jaroWinkler": 0.883333
+    },
+    {
+      "a": "naïve",
+      "b": "naive",
+      "ratio": 0.8,
+      "tokenSort": 0.8,
+      "tokenSet": 0.8,
+      "jaroWinkler": 0.893333
+    },
+    {
+      "a": "motorhead",
+      "b": "motörhead",
+      "ratio": 0.888889,
+      "tokenSort": 0.888889,
+      "tokenSet": 0.888889,
+      "jaroWinkler": 0.948148
+    },
+    {
+      "a": "dwayne johnson",
+      "b": "duane johnson",
+      "ratio": 0.888889,
+      "tokenSort": 0.888889,
+      "tokenSet": 0.888889,
+      "jaroWinkler": 0.934066
+    },
+    {
+      "a": "martha",
+      "b": "marhta",
+      "ratio": 0.833333,
+      "tokenSort": 0.833333,
+      "tokenSet": 0.833333,
+      "jaroWinkler": 0.961111
+    },
+    {
+      "a": "dixon",
+      "b": "dicksonx",
+      "ratio": 0.615385,
+      "tokenSort": 0.615385,
+      "tokenSet": 0.615385,
+      "jaroWinkler": 0.813333
+    },
+    {
+      "a": "jellyfish",
+      "b": "smellyfish",
+      "ratio": 0.842105,
+      "tokenSort": 0.842105,
+      "tokenSet": 0.842105,
+      "jaroWinkler": 0.896296
+    },
+    {
+      "a": "crate",
+      "b": "trace",
+      "ratio": 0.6,
+      "tokenSort": 0.6,
+      "tokenSet": 0.6,
+      "jaroWinkler": 0.733333
+    },
+    {
+      "a": "dwayne",
+      "b": "duane",
+      "ratio": 0.727273,
+      "tokenSort": 0.727273,
+      "tokenSet": 0.727273,
+      "jaroWinkler": 0.84
+    },
+    {
+      "a": "abcdefghij",
+      "b": "abcdefghik",
+      "ratio": 0.9,
+      "tokenSort": 0.9,
+      "tokenSet": 0.9,
+      "jaroWinkler": 0.96
+    },
+    {
+      "a": "prefix match long",
+      "b": "prefix match lung",
+      "ratio": 0.941176,
+      "tokenSort": 0.941176,
+      "tokenSet": 0.941176,
+      "jaroWinkler": 0.976471
+    },
+    {
+      "a": "elegia",
+      "b": "elegia 2015 remaster",
+      "ratio": 0.461538,
+      "tokenSort": 0.461538,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.86
+    },
+    {
+      "a": "runaway",
+      "b": "runaway piano version",
+      "ratio": 0.5,
+      "tokenSort": 0.5,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.866667
+    },
+    {
+      "a": "tri",
+      "b": "tri official audio",
+      "ratio": 0.285714,
+      "tokenSort": 0.285714,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.805556
+    },
+    {
+      "a": "brighton",
+      "b": "brighton live",
+      "ratio": 0.761905,
+      "tokenSort": 0.761905,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.923077
+    },
+    {
+      "a": "tribute to queen",
+      "b": "queen",
+      "ratio": 0.47619,
+      "tokenSort": 0.47619,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.508333
+    },
+    {
+      "a": "queen tribute band",
+      "b": "queen",
+      "ratio": 0.434783,
+      "tokenSort": 0.434783,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.855556
+    },
+    {
+      "a": "various artists",
+      "b": "unknown artist",
+      "ratio": 0.551724,
+      "tokenSort": 0.551724,
+      "tokenSet": 0.551724,
+      "jaroWinkler": 0.599471
+    },
+    {
+      "a": "smells like teen spirit",
+      "b": "smells like teen spirit",
+      "ratio": 1.0,
+      "tokenSort": 1.0,
+      "tokenSet": 1.0,
+      "jaroWinkler": 1.0
+    },
+    {
+      "a": "smells like teen spirit",
+      "b": "smells like a teen spirit",
+      "ratio": 0.958333,
+      "tokenSort": 0.958333,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.966609
+    },
+    {
+      "a": "stand by me",
+      "b": "stand by me ben e king",
+      "ratio": 0.666667,
+      "tokenSort": 0.666667,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.9
+    },
+    {
+      "a": "x",
+      "b": "xx",
+      "ratio": 0.666667,
+      "tokenSort": 0.666667,
+      "tokenSet": 0.666667,
+      "jaroWinkler": 0.85
+    },
+    {
+      "a": "aaaa",
+      "b": "aaab",
+      "ratio": 0.75,
+      "tokenSort": 0.75,
+      "tokenSet": 0.75,
+      "jaroWinkler": 0.883333
+    },
+    {
+      "a": "  spaced   out  ",
+      "b": "spaced out",
+      "ratio": 0.769231,
+      "tokenSort": 1.0,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.775
+    },
+    {
+      "a": "tab\tseparated",
+      "b": "separated tab",
+      "ratio": 0.692308,
+      "tokenSort": 1.0,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.679487
+    },
+    {
+      "a": "same same",
+      "b": "same",
+      "ratio": 0.615385,
+      "tokenSort": 0.615385,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.888889
+    },
+    {
+      "a": "a a b",
+      "b": "a b b",
+      "ratio": 0.8,
+      "tokenSort": 0.8,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.893333
+    },
+    {
+      "a": "çava",
+      "b": "cava",
+      "ratio": 0.75,
+      "tokenSort": 0.75,
+      "tokenSet": 0.75,
+      "jaroWinkler": 0.833333
+    },
+    {
+      "a": "123",
+      "b": "124",
+      "ratio": 0.666667,
+      "tokenSort": 0.666667,
+      "tokenSet": 0.666667,
+      "jaroWinkler": 0.822222
+    },
+    {
+      "a": "2pac",
+      "b": "tupac",
+      "ratio": 0.666667,
+      "tokenSort": 0.666667,
+      "tokenSet": 0.666667,
+      "jaroWinkler": 0.783333
+    },
+    {
+      "a": "acdc",
+      "b": "ac dc",
+      "ratio": 0.888889,
+      "tokenSort": 0.888889,
+      "tokenSet": 0.888889,
+      "jaroWinkler": 0.946667
+    },
+    {
+      "a": "emoji 🔥",
+      "b": "emoji",
+      "ratio": 0.833333,
+      "tokenSort": 0.833333,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.942857
+    },
+    {
+      "a": "🔥🔥",
+      "b": "🔥",
+      "ratio": 0.666667,
+      "tokenSort": 0.666667,
+      "tokenSet": 0.666667,
+      "jaroWinkler": 0.85
+    },
+    {
+      "a": "ab",
+      "b": "ba",
+      "ratio": 0.5,
+      "tokenSort": 0.5,
+      "tokenSet": 0.5,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "abcd",
+      "b": "badc",
+      "ratio": 0.5,
+      "tokenSort": 0.5,
+      "tokenSet": 0.5,
+      "jaroWinkler": 0.833333
+    },
+    {
+      "a": "$uicide",
+      "b": "suicide",
+      "ratio": 0.857143,
+      "tokenSort": 0.857143,
+      "tokenSet": 0.857143,
+      "jaroWinkler": 0.904762
+    },
+    {
+      "a": "$uicideboy$",
+      "b": "suicideboys",
+      "ratio": 0.818182,
+      "tokenSort": 0.818182,
+      "tokenSet": 0.818182,
+      "jaroWinkler": 0.878788
+    },
+    {
+      "a": "$uicide",
+      "b": "ultimate $uicide",
+      "ratio": 0.608696,
+      "tokenSort": 0.608696,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.52381
+    },
+    {
+      "a": "kill yourself (part iii)",
+      "b": "kill yourself part iii",
+      "ratio": 0.956522,
+      "tokenSort": 0.73913,
+      "tokenSet": 0.782609,
+      "jaroWinkler": 0.983333
+    },
+    {
+      "a": "kill yourself (part iii)",
+      "b": "kill yourself (part iv)",
+      "ratio": 0.93617,
+      "tokenSort": 0.93617,
+      "tokenSet": 0.93617,
+      "jaroWinkler": 0.974638
+    },
+    {
+      "a": "huntin’ wabbitz",
+      "b": "huntin' wabbitz",
+      "ratio": 0.933333,
+      "tokenSort": 0.933333,
+      "tokenSet": 0.933333,
+      "jaroWinkler": 0.973333
+    },
+    {
+      "a": "＄uicide",
+      "b": "$uicide",
+      "ratio": 0.857143,
+      "tokenSort": 0.857143,
+      "tokenSet": 0.857143,
+      "jaroWinkler": 0.904762
+    },
+    {
+      "a": "＄uicideboy＄",
+      "b": "$uicideboy$",
+      "ratio": 0.818182,
+      "tokenSort": 0.818182,
+      "tokenSet": 0.818182,
+      "jaroWinkler": 0.878788
+    },
+    {
+      "a": "﹩uicide",
+      "b": "suicide",
+      "ratio": 0.857143,
+      "tokenSort": 0.857143,
+      "tokenSet": 0.857143,
+      "jaroWinkler": 0.904762
+    },
+    {
+      "a": "﹩uicideboy﹩",
+      "b": "suicideboys",
+      "ratio": 0.818182,
+      "tokenSort": 0.818182,
+      "tokenSet": 0.818182,
+      "jaroWinkler": 0.878788
+    },
+    {
+      "a": "ca$h",
+      "b": "cash",
+      "ratio": 0.75,
+      "tokenSort": 0.75,
+      "tokenSet": 0.75,
+      "jaroWinkler": 0.866667
+    },
+    {
+      "a": "a$ap rocky feat. skepta",
+      "b": "asap rocky",
+      "ratio": 0.545455,
+      "tokenSort": 0.545455,
+      "tokenSet": 0.666667,
+      "jaroWinkler": 0.787391
+    },
+    {
+      "a": "travi$ scott",
+      "b": "travis scott",
+      "ratio": 0.916667,
+      "tokenSort": 0.916667,
+      "tokenSet": 0.916667,
+      "jaroWinkler": 0.948485
+    },
+    {
+      "a": "travis scott",
+      "b": "travi$ scott",
+      "ratio": 0.916667,
+      "tokenSort": 0.916667,
+      "tokenSet": 0.916667,
+      "jaroWinkler": 0.948485
+    },
+    {
+      "a": "ke$ha",
+      "b": "kesha",
+      "ratio": 0.8,
+      "tokenSort": 0.8,
+      "tokenSet": 0.8,
+      "jaroWinkler": 0.893333
+    },
+    {
+      "a": "p!nk",
+      "b": "pink",
+      "ratio": 0.75,
+      "tokenSort": 0.75,
+      "tokenSet": 0.75,
+      "jaroWinkler": 0.85
+    },
+    {
+      "a": "help!",
+      "b": "help",
+      "ratio": 0.888889,
+      "tokenSort": 0.888889,
+      "tokenSet": 0.888889,
+      "jaroWinkler": 0.96
+    },
+    {
+      "a": "blink-182",
+      "b": "blink 182",
+      "ratio": 0.888889,
+      "tokenSort": 0.555556,
+      "tokenSet": 0.555556,
+      "jaroWinkler": 0.955556
+    },
+    {
+      "a": "1979 - remastered 2012",
+      "b": "1979",
+      "ratio": 0.307692,
+      "tokenSort": 0.307692,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.836364
+    },
+    {
+      "a": "the smashing pumpkins",
+      "b": "smashing pumpkins",
+      "ratio": 0.894737,
+      "tokenSort": 0.894737,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.858077
+    },
+    {
+      "a": "m3gan",
+      "b": "megan",
+      "ratio": 0.8,
+      "tokenSort": 0.8,
+      "tokenSet": 0.8,
+      "jaroWinkler": 0.88
+    },
+    {
+      "a": "b0b",
+      "b": "bob",
+      "ratio": 0.666667,
+      "tokenSort": 0.666667,
+      "tokenSet": 0.666667,
+      "jaroWinkler": 0.8
+    },
+    {
+      "a": "stаy",
+      "b": "stay",
+      "ratio": 0.75,
+      "tokenSort": 0.75,
+      "tokenSet": 0.75,
+      "jaroWinkler": 0.866667
+    },
+    {
+      "a": "𝐒𝐭𝐚𝐲",
+      "b": "stay",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "ｌｏｖｅ",
+      "b": "love",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0
+    },
+    {
+      "a": "don’t stop me now",
+      "b": "dont stop me now",
+      "ratio": 0.969697,
+      "tokenSort": 0.969697,
+      "tokenSet": 0.969697,
+      "jaroWinkler": 0.986275
+    },
+    {
+      "a": "björk",
+      "b": "bjork",
+      "ratio": 0.8,
+      "tokenSort": 0.8,
+      "tokenSet": 0.8,
+      "jaroWinkler": 0.893333
+    },
+    {
+      "a": "hoppípolla",
+      "b": "hoppipolla",
+      "ratio": 0.9,
+      "tokenSort": 0.9,
+      "tokenSet": 0.9,
+      "jaroWinkler": 0.96
+    },
+    {
+      "a": "sigur rós",
+      "b": "sigur ros",
+      "ratio": 0.888889,
+      "tokenSort": 0.888889,
+      "tokenSet": 0.888889,
+      "jaroWinkler": 0.955556
+    },
+    {
+      "a": "despechá",
+      "b": "despecha",
+      "ratio": 0.875,
+      "tokenSort": 0.875,
+      "tokenSet": 0.875,
+      "jaroWinkler": 0.95
+    },
+    {
+      "a": "rosalía",
+      "b": "rosalia",
+      "ratio": 0.857143,
+      "tokenSort": 0.857143,
+      "tokenSet": 0.857143,
+      "jaroWinkler": 0.942857
+    },
+    {
+      "a": "şımarık",
+      "b": "simarik",
+      "ratio": 0.571429,
+      "tokenSort": 0.571429,
+      "tokenSet": 0.571429,
+      "jaroWinkler": 0.714286
+    },
+    {
+      "a": "straße",
+      "b": "strasse",
+      "ratio": 0.769231,
+      "tokenSort": 0.769231,
+      "tokenSet": 0.769231,
+      "jaroWinkler": 0.909524
+    },
+    {
+      "a": "mötley crüe",
+      "b": "motley crue",
+      "ratio": 0.818182,
+      "tokenSort": 0.818182,
+      "tokenSet": 0.818182,
+      "jaroWinkler": 0.890909
+    },
+    {
+      "a": "晴天",
+      "b": "晴天 (live)",
+      "ratio": 0.363636,
+      "tokenSort": 0.363636,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.792593
+    },
+    {
+      "a": "がっこう",
+      "b": "かっこう",
+      "ratio": 0.75,
+      "tokenSort": 0.75,
+      "tokenSet": 0.75,
+      "jaroWinkler": 0.833333
+    },
+    {
+      "a": "💔",
+      "b": "🔥",
+      "ratio": 0.0,
+      "tokenSort": 0.0,
+      "tokenSet": 0.0,
+      "jaroWinkler": 0.0
+    },
+    {
+      "a": "song 🔥",
+      "b": "song",
+      "ratio": 0.8,
+      "tokenSort": 0.8,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.933333
+    },
+    {
+      "a": "some_song_title",
+      "b": "some song title",
+      "ratio": 0.866667,
+      "tokenSort": 0.866667,
+      "tokenSet": 0.866667,
+      "jaroWinkler": 0.946667
+    },
+    {
+      "a": "some_artist",
+      "b": "some artist",
+      "ratio": 0.909091,
+      "tokenSort": 0.545455,
+      "tokenSet": 0.545455,
+      "jaroWinkler": 0.963636
+    },
+    {
+      "a": "song – live",
+      "b": "song (live)",
+      "ratio": 0.818182,
+      "tokenSort": 0.818182,
+      "tokenSet": 0.818182,
+      "jaroWinkler": 0.927273
+    },
+    {
+      "a": "kanye west",
+      "b": "ye (侃爷)",
+      "ratio": 0.352941,
+      "tokenSort": 0.235294,
+      "tokenSet": 0.235294,
+      "jaroWinkler": 0.57619
+    },
+    {
+      "a": "kanye west",
+      "b": "ye",
+      "ratio": 0.333333,
+      "tokenSort": 0.333333,
+      "tokenSet": 0.333333,
+      "jaroWinkler": 0.733333
+    },
+    {
+      "a": "real friends",
+      "b": "real friends (explicit)",
+      "ratio": 0.685714,
+      "tokenSort": 0.685714,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.904348
+    },
+    {
+      "a": "kanye west",
+      "b": "kanye west、ty dolla $ign",
+      "ratio": 0.588235,
+      "tokenSort": 0.588235,
+      "tokenSet": 0.666667,
+      "jaroWinkler": 0.883333
+    },
+    {
+      "a": "sunlight on your skin",
+      "b": "sunlight on your skin (explicit)",
+      "ratio": 0.792453,
+      "tokenSort": 0.792453,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.93125
+    },
+    {
+      "a": "lil peep feat. ilovemakonnen",
+      "b": "lil peep、ilovemakonnen",
+      "ratio": 0.84,
+      "tokenSort": 0.56,
+      "tokenSet": 0.72,
+      "jaroWinkler": 0.89329
+    },
+    {
+      "a": "lil peep feat. ilovemakonnen",
+      "b": "lil peep/ilovemakonnen",
+      "ratio": 0.84,
+      "tokenSort": 0.56,
+      "tokenSet": 0.72,
+      "jaroWinkler": 0.89329
+    },
+    {
+      "a": "kendrick lamar feat. jay rock",
+      "b": "kendrick lamar、jay rock",
+      "ratio": 0.846154,
+      "tokenSort": 0.730769,
+      "tokenSet": 0.730769,
+      "jaroWinkler": 0.933938
+    },
+    {
+      "a": "money trees",
+      "b": "money trees deuce",
+      "ratio": 0.785714,
+      "tokenSort": 0.785714,
+      "tokenSet": 1.0,
+      "jaroWinkler": 0.929412
+    },
+    {
+      "a": "kendrick lamar",
+      "b": "jay rock",
+      "ratio": 0.272727,
+      "tokenSort": 0.272727,
+      "tokenSet": 0.272727,
+      "jaroWinkler": 0.428571
+    },
+    {
+      "a": "stronger (explicit)",
+      "b": "stronger (clean)",
+      "ratio": 0.685714,
+      "tokenSort": 0.685714,
+      "tokenSet": 0.685714,
+      "jaroWinkler": 0.908083
+    },
+    {
+      "a": "kanye west feat. t-pain",
+      "b": "ye、t-pain",
+      "ratio": 0.5,
+      "tokenSort": 0.5,
+      "tokenSet": 0.5,
+      "jaroWinkler": 0.457649
+    }
+  ]
+}

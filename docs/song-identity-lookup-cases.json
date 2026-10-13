@@ -1,0 +1,1354 @@
+{
+  "about": [
+    "Cases for SongIdentity's lookup readings (Lookup::Owned and Lookup::Pick in crates/octo-core/src/common/song_identity.rs).",
+    "Every case runs with Owned and with Pick, both ways round. Unless a case's options say otherwise, lengths may be 8 s apart. Verdicts: same, version (the same song in another version, or lengths too far apart), different.",
+    "Owned adds the same title written in another script (the two titles start in different scripts and their Latin spellings key the same) and the same artists credited another way (tribute words agree, no placeholder, every name of the shorter credit and the whole credit at least 0.92 by word-order-free similarity). Pick adds, on top, a title a typo away: both lengths known and within the tolerance, the shorter key at least six letters, the same numbers, trailing roman numeral and word count, and an indel ratio of at least 0.90.",
+    "'romanized' records the Latin spelling keys the cases rest on. 'contractChanges' lists every case of docs/song-identity-cases.json whose verdict moves with a lookup on (by index in its compare list), with what it was and why."
+  ],
+  "romanized": [
+    {
+      "text": "Камин",
+      "key": "kamin"
+    },
+    {
+      "text": "Камни",
+      "key": "kamni"
+    },
+    {
+      "text": "Группа крови",
+      "key": "gruppakrovi"
+    },
+    {
+      "text": "Кино",
+      "key": "kino"
+    },
+    {
+      "text": "Спокойная ночь",
+      "key": "spokoynayanoch"
+    },
+    {
+      "text": "নেশার বোঝা",
+      "key": "nesarbojha"
+    },
+    {
+      "text": "Ελλάδα",
+      "key": "ellada"
+    },
+    {
+      "text": "さくら",
+      "key": "sakura"
+    },
+    {
+      "text": "紅蓮華",
+      "key": "honglianhua"
+    },
+    {
+      "text": "十年",
+      "key": "shinian"
+    },
+    {
+      "text": "时年",
+      "key": "shinian"
+    },
+    {
+      "text": "晴天",
+      "key": "qingtian"
+    },
+    {
+      "text": "周杰伦",
+      "key": "zhoujielun"
+    },
+    {
+      "text": "사랑",
+      "key": "salang"
+    }
+  ],
+  "cases": [
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY",
+        "seconds": 200
+      },
+      "b": {
+        "title": "Камин",
+        "artist": "EMIN, JONY",
+        "seconds": 201
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A Cyrillic title and its Latin spelling are one song."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "Across scripts no length is needed."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY",
+        "seconds": 200
+      },
+      "b": {
+        "title": "Камин",
+        "artist": "EMIN, JONY",
+        "seconds": 220
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Across scripts a known pair of lengths must still agree."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY",
+        "seconds": 200
+      },
+      "b": {
+        "title": "Камин (Live)",
+        "artist": "EMIN, JONY",
+        "seconds": 201
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Across scripts the version must still agree: a live take is not the studio one."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Remastered 2020)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "Across scripts a remaster is the same recording."
+    },
+    {
+      "a": {
+        "title": "Камин",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камни",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "Two different Cyrillic titles never match."
+    },
+    {
+      "a": {
+        "title": "Gruppa krovi",
+        "artist": "Kino",
+        "seconds": 285
+      },
+      "b": {
+        "title": "Группа крови",
+        "artist": "Кино",
+        "seconds": 286
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "The artist and the title both in another script: the credit reads the same once spelled in Latin letters."
+    },
+    {
+      "a": {
+        "title": "Spokoynaya noch",
+        "artist": "Kino"
+      },
+      "b": {
+        "title": "Спокойная ночь",
+        "artist": "Kino"
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A Cyrillic title spelled the way the romanization spells it: the soft sign is dropped."
+    },
+    {
+      "a": {
+        "title": "Spokoinaya noch",
+        "artist": "Kino"
+      },
+      "b": {
+        "title": "Спокойная ночь",
+        "artist": "Kino"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A Cyrillic title spelled another way ('i' for 'й') is an honest miss."
+    },
+    {
+      "a": {
+        "title": "Neshar Bojha",
+        "artist": "Pritom Hasan",
+        "seconds": 236
+      },
+      "b": {
+        "title": "নেশার বোঝা",
+        "artist": "Pritom Hasan",
+        "seconds": 236
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A Bengali title spells 'শ' as 's', the usual Latin spelling writes 'sh': an honest miss."
+    },
+    {
+      "a": {
+        "title": "নেশার বোঝা",
+        "artist": "Pritom Hasan"
+      },
+      "b": {
+        "title": "নেশার বোঝা",
+        "artist": "Pritom Hasan"
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A Bengali title against the same Bengali title is the same song as always."
+    },
+    {
+      "a": {
+        "title": "Ellada",
+        "artist": "Artist"
+      },
+      "b": {
+        "title": "Ελλάδα",
+        "artist": "Artist"
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A Greek title and its Latin spelling are one song."
+    },
+    {
+      "a": {
+        "title": "Sakura",
+        "artist": "Ikimono-gakari"
+      },
+      "b": {
+        "title": "さくら",
+        "artist": "Ikimono-gakari"
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A Japanese kana title and its Latin spelling are one song."
+    },
+    {
+      "a": {
+        "title": "Gurenge",
+        "artist": "LiSA",
+        "seconds": 239
+      },
+      "b": {
+        "title": "紅蓮華",
+        "artist": "LiSA",
+        "seconds": 239
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A Japanese kanji title is spelled as Chinese, never as the Japanese reading: Gurenge is an honest miss."
+    },
+    {
+      "a": {
+        "title": "Gurenge",
+        "artist": "LiSA",
+        "seconds": 239,
+        "isrc": "JPU901901234"
+      },
+      "b": {
+        "title": "紅蓮華",
+        "artist": "LiSA",
+        "seconds": 239,
+        "isrc": "JP-U90-19-01234"
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "One ISRC is one recording whatever the script."
+    },
+    {
+      "a": {
+        "title": "十年",
+        "artist": "陈奕迅"
+      },
+      "b": {
+        "title": "时年",
+        "artist": "陈奕迅"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "Two different Chinese titles that share one spelling never match: a spelling loses the tones."
+    },
+    {
+      "a": {
+        "title": "Shi Nian",
+        "artist": "Eason Chan"
+      },
+      "b": {
+        "title": "十年",
+        "artist": "Eason Chan"
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A Chinese title and its pinyin are one song when the artist agrees."
+    },
+    {
+      "a": {
+        "title": "Qing Tian",
+        "artist": "Jay Chou"
+      },
+      "b": {
+        "title": "晴天",
+        "artist": "周杰伦"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A Chinese artist name and its English name share no spelling: 周杰伦 is not Jay Chou by text."
+    },
+    {
+      "a": {
+        "title": "Salang",
+        "artist": "Artist"
+      },
+      "b": {
+        "title": "사랑",
+        "artist": "Artist"
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A Korean title and its Latin spelling, as the spelling writes it."
+    },
+    {
+      "a": {
+        "title": "Sarang",
+        "artist": "Artist"
+      },
+      "b": {
+        "title": "사랑",
+        "artist": "Artist"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A Korean title spelled the usual way is an honest miss."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi",
+        "seconds": 229
+      },
+      "b": {
+        "title": "Despacito",
+        "artist": "Fonsi, Luis",
+        "seconds": 229
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A credit written surname first is the same artist."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A credit written surname first needs no length."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi",
+        "seconds": 229
+      },
+      "b": {
+        "title": "Despacito",
+        "artist": "Fonsi, Luis",
+        "seconds": 260
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "A credit written surname first: a known pair of lengths must still agree."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito",
+        "artist": "Luis Miguel"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "Another artist who shares a first name is another artist."
+    },
+    {
+      "a": {
+        "title": "Hallelujah",
+        "artist": "Leonard Cohen"
+      },
+      "b": {
+        "title": "Hallelujah",
+        "artist": "Jeff Buckley"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A cover by another artist is another recording."
+    },
+    {
+      "a": {
+        "title": "Genie in a Bottle",
+        "artist": "Christina Aguilera",
+        "seconds": 216
+      },
+      "b": {
+        "title": "Genie in a Bottle",
+        "artist": "Christina Aguillera",
+        "seconds": 216
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A typo in a long artist name is the same artist."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen Tribute Band",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A tribute band is never the band."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi",
+        "seconds": 229
+      },
+      "b": {
+        "title": "Despacito",
+        "artist": "Fonsi, Luis (Karaoke)",
+        "seconds": 229
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A karaoke credit is never the artist, even when the word is in brackets."
+    },
+    {
+      "a": {
+        "title": "Hello",
+        "artist": "Adele",
+        "seconds": 295
+      },
+      "b": {
+        "title": "Hello",
+        "artist": "Adele Karaoke",
+        "seconds": 295
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A karaoke credit is never the artist."
+    },
+    {
+      "a": {
+        "title": "Yellow",
+        "artist": "Coldplay Covers"
+      },
+      "b": {
+        "title": "Yellow",
+        "artist": "Coldplay"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A covers credit is never the artist, even a letter away."
+    },
+    {
+      "a": {
+        "title": "Intro",
+        "artist": "Various Artists"
+      },
+      "b": {
+        "title": "Intro",
+        "artist": "Various Artist"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A placeholder credit names nobody."
+    },
+    {
+      "a": {
+        "title": "Stand by Me",
+        "artist": "Ben E. King"
+      },
+      "b": {
+        "title": "Stand by Me",
+        "artist": "Oasis"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "Another artist's song of the same name is another song."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi feat. Daddy Yankee"
+      },
+      "b": {
+        "title": "Despacito",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A credit surname first with a guest the other side lacks is an honest miss."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody",
+        "artist": "Queen",
+        "seconds": 355
+      },
+      "owned": "different",
+      "pick": "same",
+      "note": "A typo at the same length: only a pick among search results takes it."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody",
+        "artist": "Queen",
+        "seconds": 374
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A typo 20 s apart is another recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen"
+      },
+      "b": {
+        "title": "Bohemian Rapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A typo with a length unknown is never taken."
+    },
+    {
+      "a": {
+        "title": "Believer",
+        "artist": "Imagine Dragons",
+        "seconds": 204
+      },
+      "b": {
+        "title": "Beleiver",
+        "artist": "Imagine Dragons",
+        "seconds": 204
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "Two swapped letters in a short title are too far apart."
+    },
+    {
+      "a": {
+        "title": "Smells Like Teen Spirit",
+        "artist": "Nirvana",
+        "seconds": 301
+      },
+      "b": {
+        "title": "Smells Like Teen Sprit",
+        "artist": "Nirvana",
+        "seconds": 301
+      },
+      "owned": "different",
+      "pick": "same",
+      "note": "A dropped letter in a long title, same length."
+    },
+    {
+      "a": {
+        "title": "Mine",
+        "artist": "Taylor Swift",
+        "seconds": 230
+      },
+      "b": {
+        "title": "Mind",
+        "artist": "Taylor Swift",
+        "seconds": 230
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "Short titles a letter apart are different songs."
+    },
+    {
+      "a": {
+        "title": "Angel",
+        "artist": "Massive Attack",
+        "seconds": 379
+      },
+      "b": {
+        "title": "Angels",
+        "artist": "Massive Attack",
+        "seconds": 379
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A plural is a different song."
+    },
+    {
+      "a": {
+        "title": "Intermission Part 1",
+        "artist": "Artist",
+        "seconds": 120
+      },
+      "b": {
+        "title": "Intermission Part 2",
+        "artist": "Artist",
+        "seconds": 120
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "Part 1 is not Part 2."
+    },
+    {
+      "a": {
+        "title": "Rocky Theme II",
+        "artist": "Artist",
+        "seconds": 150
+      },
+      "b": {
+        "title": "Rocky Theme III",
+        "artist": "Artist",
+        "seconds": 150
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A different trailing roman numeral is a different song."
+    },
+    {
+      "a": {
+        "title": "Symphony 5",
+        "artist": "Orchestra",
+        "seconds": 400
+      },
+      "b": {
+        "title": "Symphony 6",
+        "artist": "Orchestra",
+        "seconds": 400
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A different number is a different song."
+    },
+    {
+      "a": {
+        "title": "Dancing Queen",
+        "artist": "ABBA",
+        "seconds": 231
+      },
+      "b": {
+        "title": "Dancing Queens Now",
+        "artist": "ABBA",
+        "seconds": 231
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A word more is not a typo."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody",
+        "artist": "Panic! at the Disco",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "different",
+      "note": "A typo and another artist is another song."
+    },
+    {
+      "a": {
+        "title": "Elegia",
+        "artist": "New Order",
+        "seconds": 293
+      },
+      "b": {
+        "title": "Elegia - 2015 Remaster",
+        "artist": "New Order",
+        "seconds": 293
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "A remaster tail is the same recording."
+    },
+    {
+      "a": {
+        "title": "Runaway",
+        "artist": "Kanye West",
+        "seconds": 548
+      },
+      "b": {
+        "title": "Runaway (Piano Version)",
+        "artist": "Kanye West",
+        "seconds": 548
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "A piano version is not the original."
+    },
+    {
+      "a": {
+        "title": "Runaway (Piano Version)",
+        "artist": "Kanye West",
+        "seconds": 243
+      },
+      "b": {
+        "title": "Runaway (Piano Version)",
+        "artist": "Kanye West",
+        "seconds": 309
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Two piano versions of very different lengths are different recordings."
+    },
+    {
+      "a": {
+        "title": "Tri",
+        "artist": "Artist",
+        "seconds": 180
+      },
+      "b": {
+        "title": "Tri (Official Audio)",
+        "artist": "Artist",
+        "seconds": 180
+      },
+      "owned": "same",
+      "pick": "same",
+      "note": "Upload noise in brackets is ignored."
+    },
+    {
+      "a": {
+        "title": "Brighton",
+        "artist": "Artist",
+        "seconds": 200
+      },
+      "b": {
+        "title": "Brighton (Live)",
+        "artist": "Artist",
+        "seconds": 200
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "A live take is not the studio one."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Live)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: live against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Live)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: live against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Live)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: live against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Acoustic)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: acoustic against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Acoustic)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: acoustic against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Acoustic)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: acoustic against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Remix)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: remix against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Remix)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: remix against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Remix)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: remix against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Instrumental)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: instrumental against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Instrumental)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: instrumental against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Instrumental)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: instrumental against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Karaoke Version)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: karaoke against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Karaoke Version)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: karaoke against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Karaoke Version)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: karaoke against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Sped Up)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: sped up against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Sped Up)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: sped up against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Sped Up)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: sped up against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Slowed)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: slowed against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Slowed)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: slowed against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Slowed)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: slowed against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Nightcore)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: nightcore against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Nightcore)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: nightcore against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Nightcore)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: nightcore against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Piano Version)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: piano against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Piano Version)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: piano against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Piano Version)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: piano against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Demo)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: demo against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Demo)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: demo against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Demo)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: demo against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Extended Mix)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: extended against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Extended Mix)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: extended against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Extended Mix)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: extended against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (A Cappella)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: acapella against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (A Cappella)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: acapella against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (A Cappella)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: acapella against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (Unplugged)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: unplugged against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (Unplugged)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: unplugged against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (Unplugged)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: unplugged against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Despacito",
+        "artist": "Luis Fonsi"
+      },
+      "b": {
+        "title": "Despacito (8D Audio)",
+        "artist": "Fonsi, Luis"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Credit written another way: 8d against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Kamin",
+        "artist": "EMIN, JONY"
+      },
+      "b": {
+        "title": "Камин (8D Audio)",
+        "artist": "EMIN, JONY"
+      },
+      "owned": "version",
+      "pick": "version",
+      "note": "Title in another script: 8d against the studio recording."
+    },
+    {
+      "a": {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "b": {
+        "title": "Bohemian Rapsody (8D Audio)",
+        "artist": "Queen",
+        "seconds": 354
+      },
+      "owned": "different",
+      "pick": "version",
+      "note": "Title a typo away: 8d against the studio recording."
+    }
+  ],
+  "contractChanges": []
+}

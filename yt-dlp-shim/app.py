@@ -15,6 +15,11 @@ Endpoints:
       With a hint it picks the closest-length of several flat candidates
       (cheap, no per-video extraction), then resolves the winner's URL.
 
+  GET /facts?id=<videoId>
+      The stream /stream would send for a video: format id (itag), exact
+      size in bytes, container and bit rate. /search carries the same fields
+      for the video it found.
+
   GET /stream?id=<videoId>
       Resolves the best-audio URL (cached), then proxies bytes from
       YouTube's CDN to the caller. Streaming chunks so this stays
@@ -27,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -38,7 +44,12 @@ import requests
 from requests.adapters import HTTPAdapter
 from flask import Flask, Response, abort, jsonify, request, stream_with_context
 
+import ytm
+
+import facts as stream_info
+import loudness as loudness_info
 from gate import TieredGate
+from loudness import LoudnessBook
 
 # The binary baked into the image. Never written to, so a rebuild is always a
 # clean floor to fall back to.
@@ -112,6 +123,15 @@ _URL_CACHE_TTL = int(os.environ.get("URL_CACHE_TTL", "3600"))  # 1 hour, well un
 _INFLIGHT_LOCK = threading.Lock()
 _INFLIGHT: "dict[str, threading.Lock]" = {}
 
+# What /health reports: /stream bodies being sent now, and yt-dlp processes running now.
+_COUNTS_LOCK = threading.Lock()
+_COUNTS = {"active_streams": 0, "ytdlp_running": 0}
+
+
+def _count(name: str, change: int) -> None:
+    with _COUNTS_LOCK:
+        _COUNTS[name] += change
+
 # One pooled HTTPS session for all upstream googlevideo byte-proxying. Reuses
 # the TCP+TLS connection across an iOS client's `Range: bytes=0-1` probe and
 # the real range GET that follows, instead of a fresh handshake per request.
@@ -151,6 +171,46 @@ def _url_cache_put(video_id: str, url: str):
         _URL_CACHE.move_to_end(video_id)
         while len(_URL_CACHE) > _URL_CACHE_MAX:
             _URL_CACHE.popitem(last=False)
+
+# What each video's stream is (itag, size, container, bit rate), learned in the same run that
+# picked its URL. A video's format and size do not change, so these outlive the URL itself.
+_FACTS_LOCK = threading.Lock()
+_FACTS: "OrderedDict[str, dict]" = OrderedDict()
+_FACTS_MAX = int(os.environ.get("FACTS_CACHE_MAX", "4096"))
+
+
+def _facts_get(video_id: str) -> dict:
+    with _FACTS_LOCK:
+        known = _FACTS.get(video_id)
+        if known is None:
+            return {}
+        _FACTS.move_to_end(video_id)
+        return dict(known)
+
+
+def _facts_put(video_id: str, learned: dict):
+    """Keep what is known; a later answer fills gaps and a measured size replaces a printed one."""
+    if not video_id:
+        return
+    with _FACTS_LOCK:
+        known = dict(_FACTS.get(video_id) or {})
+        for key, value in learned.items():
+            if value is not None:
+                known[key] = value
+        _FACTS[video_id] = known
+        _FACTS.move_to_end(video_id)
+        while len(_FACTS) > _FACTS_MAX:
+            _FACTS.popitem(last=False)
+
+
+def _with_facts(payload: dict) -> dict:
+    """A /search payload with its video's stream facts, when the run that found it had them."""
+    known = _facts_get(payload.get("video_id") or "")
+    for key in ("size", "itag", "ext", "abr"):
+        if known.get(key) is not None:
+            payload[key] = known[key]
+    return payload
+
 
 def _url_cache_evict(video_id: str):
     with _URL_CACHE_LOCK:
@@ -226,13 +286,17 @@ def _run(args: list[str], timeout: int = 20, label: str = "ytdlp",
         full = [YTDLP, "--no-warnings", "--no-playlist", *args]
         t_run = time.monotonic()
         try:
-            cp = subprocess.run(
-                full,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
+            _count("ytdlp_running", 1)
+            try:
+                cp = subprocess.run(
+                    full,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            finally:
+                _count("ytdlp_running", -1)
         except subprocess.TimeoutExpired:
             log.warning("yt-dlp timed out (%s, gate_wait_ms=%.0f): %s", label, gate_ms, " ".join(args))
             return None
@@ -257,7 +321,11 @@ def _run(args: list[str], timeout: int = 20, label: str = "ytdlp",
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True)
+    """Up, plus how busy: /stream bodies being sent now, yt-dlp processes running now, and how
+    many yt-dlp may run at once. Octo's family load view reads these."""
+    with _COUNTS_LOCK:
+        active, running = _COUNTS["active_streams"], _COUNTS["ytdlp_running"]
+    return jsonify(ok=True, active_streams=active, ytdlp_running=running, ytdlp_limit=_GATE.total)
 
 
 def _is_bg() -> bool:
@@ -314,6 +382,7 @@ def _search_single(q: str, bg: bool = False) -> Optional[dict]:
             "-f", _AUDIO_FORMAT,
             "--ignore-no-formats-error",
             "--print", "%(.{id,title,duration,channel})j",
+            "--print", stream_info.FORMAT_PRINT,
             "--print", "%(urls)s",
         ],
         timeout=15,
@@ -322,7 +391,7 @@ def _search_single(q: str, bg: bool = False) -> Optional[dict]:
     )
     if out is None:
         return None
-    lines = [ln.strip() for ln in out.strip().split("\n") if ln.strip()]
+    lines, format_line, stream_url = stream_info.split_run(out)
     if not lines:
         return {}
     try:
@@ -331,14 +400,31 @@ def _search_single(q: str, bg: bool = False) -> Optional[dict]:
         log.warning("search: bad json from yt-dlp: %s", e)
         return None
     payload = _payload_from(data)
-    stream_url = lines[1] if len(lines) > 1 else None
     if payload.get("video_id") and stream_url:
         # Warm the URL cache from the SAME extraction. This used to be a second
         # `yt-dlp -g` on a detached daemon thread; folding it in removes an
         # entire yt-dlp invocation per track and makes the warm /stream path a
         # deterministic cache hit instead of a gate-race.
         _url_cache_put(payload["video_id"], stream_url)
-    return payload
+        _facts_put(payload["video_id"], stream_info.stream_facts(format_line, stream_url))
+    return _with_facts(payload)
+
+
+_LIVE = re.compile(r"\b(live|unplugged|in concert|concert|bootleg)\b", re.IGNORECASE)
+
+
+def _rank_by_length(candidates: list, q: str, duration_hint: int) -> list:
+    """Closest length first, but a live take never beats a studio one unless the query asks
+    for live itself. A live video of a song is usually within seconds of the studio length,
+    so length alone picked it as often as not. All of them live: the closest still plays."""
+    wants_live = bool(_LIVE.search(q))
+
+    def key(r: dict):
+        live = 0 if wants_live or not _LIVE.search(r.get("title") or "") else 1
+        length = abs((r.get("duration") or 0) - duration_hint) if r.get("duration") else float("inf")
+        return (live, length)
+
+    return sorted(candidates, key=key)
 
 
 def _search_with_hint(q: str, duration_hint: int, bg: bool = False) -> Optional[dict]:
@@ -371,17 +457,14 @@ def _search_with_hint(q: str, duration_hint: int, bg: bool = False) -> Optional[
             pass
     if not candidates:
         return {}
-    # Closest duration wins; candidates without a duration sort last so a hint
-    # never drags us onto an entry we can't length-match.
-    candidates.sort(
-        key=lambda r: abs((r.get("duration") or 0) - duration_hint)
-        if r.get("duration") else float("inf")
-    )
+    # Closest duration wins, live takes last; candidates without a duration sort
+    # last so a hint never drags us onto an entry we can't length-match.
+    candidates = _rank_by_length(candidates, q, duration_hint)
     payload = _payload_from(candidates[0])
     if payload.get("video_id"):
         # Warm the URL cache for the coming /stream (single-flight + cached).
         _resolve_url(payload["video_id"], bg)
-    return payload
+    return _with_facts(payload)
 
 
 _META_CACHE_LOCK = threading.Lock()
@@ -495,9 +578,7 @@ def meta():
                     pass
         if not cands:
             return jsonify(error="no_hit"), 404
-        cands.sort(key=lambda r: abs((r.get("duration") or 0) - duration_hint)
-                   if r.get("duration") else float("inf"))
-        data = cands[0]
+        data = _rank_by_length(cands, q, duration_hint)[0]
     else:
         out = _run([f"ytsearch1:{q}", "--flat-playlist", "--print", "%(.{id,title,duration})j"],
                    timeout=15, label="meta", bg=bg)
@@ -547,10 +628,12 @@ def _resolve_url(video_id: str, bg: bool = False) -> Optional[str]:
         cached = _url_cache_get(video_id)
         if cached:
             return cached
+        # The same URL `-g` printed, plus the picked format's facts from the same run.
         out = _run(
             [
-                "-g",
                 "-f", _AUDIO_FORMAT,
+                "--print", stream_info.FORMAT_PRINT,
+                "--print", "%(urls)s",
                 f"https://www.youtube.com/watch?v={video_id}",
             ],
             timeout=15,
@@ -559,9 +642,10 @@ def _resolve_url(video_id: str, bg: bool = False) -> Optional[str]:
         )
         if not out:
             return None
-        url = out.strip().split("\n", 1)[0].strip()
+        _, format_line, url = stream_info.split_run(out)
         if url:
             _url_cache_put(video_id, url)
+            _facts_put(video_id, stream_info.stream_facts(format_line, url))
         return url or None
     finally:
         # Only the thread that actually holds the lock may pop and release it.
@@ -685,12 +769,179 @@ def _maybe_self_update(reason: str) -> bool:
     return False
 
 
+# ReplayGain for played videos. Measuring reads the whole audio once more, so it runs only on a
+# play, LOUDNESS_PER_MINUTE at most a minute, and one at a time under its own limit (never a
+# yt-dlp gate slot, so it never makes a play or a resolve wait).
+_LOUDNESS = LoudnessBook(per_minute=int(os.environ.get("LOUDNESS_PER_MINUTE", "2")))
+_LOUDNESS_TIMEOUT_SEC = int(os.environ.get("LOUDNESS_TIMEOUT_SEC", "120"))
+
+
+def _measure_loudness(url: str) -> Optional[dict]:
+    try:
+        cp = subprocess.run(
+            loudness_info.ffmpeg_args(url, _UPSTREAM_UA),
+            capture_output=True,
+            text=True,
+            timeout=_LOUDNESS_TIMEOUT_SEC,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        log.warning("loudness measurement failed: %s", e)
+        return None
+    measured = loudness_info.parse_ebur128(cp.stderr)
+    if measured is None:
+        return None
+    return loudness_info.replay_gain(*measured)
+
+
+def _maybe_measure_loudness(video_id: str, url: str) -> bool:
+    """Starts measuring a played video's loudness in the background. False when it is known,
+    a measurement is running, or the minute's cap is reached."""
+    if _LOUDNESS.get(video_id) is not None:
+        return False
+    if not _LOUDNESS.begin(video_id):
+        return False
+
+    def run():
+        measured = None
+        try:
+            measured = _measure_loudness(url)
+            log.debug("loudness %s: %s", video_id, measured)
+        finally:
+            _LOUDNESS.finish(video_id, measured)
+
+    threading.Thread(target=run, name=f"loudness-{video_id}", daemon=True).start()
+    return True
+
+
 def _open_upstream(url: str, headers: dict, video_id: str):
     try:
         return _SESSION.get(url, stream=True, timeout=(8, 30), headers=headers)
     except Exception as e:
         log.warning("stream upstream failed for %s: %s", video_id, e)
         return None
+
+
+# --- YouTube Music (Octo's radio) -------------------------------------------------
+# Search and radio through ytmusicapi, no sign-in. These are plain HTTP calls to YouTube
+# Music, not yt-dlp processes, so they have their own small gate instead of TieredGate.
+_YTM_GATE = threading.BoundedSemaphore(int(os.environ.get("YTM_MAX_CONCURRENT", "3")))
+# Octo gives a radio source 8 s; a request still queued past this has no one waiting for it, and
+# would only hold a gunicorn thread that playback needs.
+_YTM_GATE_WAIT = float(os.environ.get("YTM_GATE_WAIT_SEC", "5"))
+# One cache per kind, so a burst of radios never pushes the searches out.
+_YTM_CACHE: "dict[str, OrderedDict]" = {"search": OrderedDict(), "radio": OrderedDict(), "artist": OrderedDict()}
+_YTM_LIMIT = {"search": 2000, "radio": 500, "artist": 500}
+_YTM_LOCK = threading.Lock()
+_YTM_TTL = {"search": 24 * 3600, "radio": 3600, "artist": 3600}
+
+
+def _arg_int(name, default, low, high):
+    try:
+        return min(max(int(request.args.get(name, default)), low), high)
+    except (TypeError, ValueError):
+        return default
+
+
+def _ytm_cached(kind, key, load):
+    """A cached answer, else load() under the gate; None when the gate stays full."""
+    cache = _YTM_CACHE[kind]
+    with _YTM_LOCK:
+        hit = cache.get(key)
+        if hit and time.time() - hit[0] < _YTM_TTL[kind]:
+            cache.move_to_end(key)
+            return hit[1]
+    if not _YTM_GATE.acquire(timeout=_YTM_GATE_WAIT):
+        return None
+    try:
+        value = load()
+    finally:
+        _YTM_GATE.release()
+    with _YTM_LOCK:
+        cache[key] = (time.time(), value)
+        while len(cache) > _YTM_LIMIT[kind]:
+            cache.popitem(last=False)
+    return value
+
+
+@app.get("/ytm/search")
+def ytm_search():
+    q = request.args.get("q", "").strip()
+    if not q:
+        abort(400, "missing q")
+    filter_name = request.args.get("filter", "songs")
+    if filter_name not in ("songs", "videos"):
+        abort(400, "filter must be songs or videos")
+    limit = _arg_int("limit", 10, 1, 20)
+    try:
+        rows = _ytm_cached("search", (q.lower(), filter_name, limit), lambda: ytm.search(q, filter_name, limit))
+    except Exception as e:  # ytmusicapi raises plain exceptions when YouTube Music changes its pages
+        log.warning("ytm search failed for %r: %s", q, e)
+        return jsonify(error="ytm_failed"), 502
+    if rows is None:
+        return jsonify(error="busy"), 503
+    return jsonify(tracks=rows)
+
+
+@app.get("/ytm/radio")
+def ytm_radio():
+    video_id = request.args.get("videoId", "").strip()
+    if not video_id:
+        abort(400, "missing videoId")
+    limit = _arg_int("limit", 50, 1, 100)
+    try:
+        rows = _ytm_cached("radio", (video_id, limit), lambda: ytm.radio(video_id, limit))
+    except Exception as e:
+        log.warning("ytm radio failed for %s: %s", video_id, e)
+        return jsonify(error="ytm_failed"), 502
+    if rows is None:
+        return jsonify(error="busy"), 503
+    return jsonify(tracks=rows)
+
+
+@app.get("/ytm/artist-radio")
+def ytm_artist_radio():
+    q = request.args.get("q", "").strip()
+    if not q:
+        abort(400, "missing q")
+    limit = _arg_int("limit", 50, 1, 100)
+    try:
+        found = _ytm_cached("artist", (q.lower(), limit), lambda: ytm.artist_radio(q, limit))
+    except Exception as e:
+        log.warning("ytm artist radio failed for %r: %s", q, e)
+        return jsonify(error="ytm_failed"), 502
+    if found is None:
+        return jsonify(error="busy"), 503
+    artist, rows = found
+    return jsonify(artist=artist, tracks=rows)
+
+
+@app.get("/facts")
+def stream_facts():
+    """What /stream would send for a video: {video_id, itag, size, ext, abr}, plus
+    {track_gain, track_peak} once a play measured its loudness.
+
+    Resolves the URL the way /stream does (same format, same cache, same gate) when this video
+    has not been resolved yet, so a later play of it is a cache hit.
+    """
+    video_id = request.args.get("id", "").strip()
+    if not video_id:
+        abort(400, "missing id")
+    if not stream_info.is_video_id(video_id):
+        abort(400, "not a video id")
+    known = _facts_get(video_id)
+    if known.get("size") is None:
+        if not _resolve_url(video_id, _is_bg()):
+            return jsonify(error="no_audio_url"), 502
+        known = _facts_get(video_id)
+    return jsonify(
+        video_id=video_id,
+        itag=known.get("itag"),
+        size=known.get("size"),
+        ext=known.get("ext"),
+        abr=known.get("abr"),
+        **(_LOUDNESS.get(video_id) or {}),
+    )
 
 
 @app.get("/stream")
@@ -762,6 +1013,18 @@ def stream():
                 url = _resolve_url(video_id)
                 upstream = _open_upstream(url, upstream_headers, video_id) if url else None
 
+    # A range past the end is the caller's mistake, not an upstream failure: pass the 416 and
+    # its `bytes */<size>` back, which is how a player probing the end learns the length.
+    if upstream is not None and upstream.status_code == 416:
+        total = stream_info.total_from_content_range(upstream.headers.get("Content-Range"))
+        upstream.close()
+        if total is not None:
+            _facts_put(video_id, {"size": total})
+        headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-store", "Content-Length": "0"}
+        if total is not None:
+            headers["Content-Range"] = f"bytes */{total}"
+        return Response(b"", status=416, headers=headers)
+
     if upstream is None or upstream.status_code not in (200, 206):
         code = upstream.status_code if upstream is not None else "n/a"
         if upstream is not None:
@@ -769,9 +1032,14 @@ def stream():
         log.warning("stream upstream %s for %s", code, video_id)
         return jsonify(error="upstream_failed"), 502
 
+    # A play from the first byte (not a seek) is when a video's loudness is worth measuring.
+    if not incoming_range or incoming_range.replace(" ", "").lower().startswith("bytes=0-"):
+        _maybe_measure_loudness(video_id, url)
+
     @stream_with_context
     def generator():
         first = True
+        _count("active_streams", 1)
         try:
             for chunk in upstream.iter_content(chunk_size=64 * 1024):
                 if chunk:
@@ -782,6 +1050,7 @@ def stream():
                         first = False
                     yield chunk
         finally:
+            _count("active_streams", -1)
             try:
                 upstream.close()
             except Exception:
@@ -794,6 +1063,14 @@ def stream():
     # the caller never made as partial. Report 200 to the caller instead and
     # drop Content-Range: upstream's Content-Length already equals the full
     # size here since the synthesized range always starts at byte 0.
+    # The bytes themselves are the last word on the size: the total of a partial answer, or
+    # the whole body of one that starts at the first byte.
+    played_size = stream_info.total_from_content_range(upstream.headers.get("Content-Range"))
+    if played_size is None and upstream.status_code == 200:
+        played_size = stream_info.total_from_content_range(f"/{upstream.headers.get('Content-Length', '')}")
+    if played_size is not None:
+        _facts_put(video_id, {"size": played_size})
+
     response_status = upstream.status_code
     headers = {
         "Content-Type": upstream.headers.get("Content-Type", "audio/mp4"),

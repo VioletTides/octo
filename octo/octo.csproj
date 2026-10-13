@@ -8,8 +8,8 @@
         <!-- Dated releases. Version must be numeric for the assembly, so 07 loses its
              leading zero there; InformationalVersion carries the tag name verbatim and
              is what the dashboard shows. Bump both when tagging a release. -->
-        <Version>2026.9.8</Version>
-        <InformationalVersion>2026.09.08</InformationalVersion>
+        <Version>2026.10.5</Version>
+        <InformationalVersion>2026.10.05</InformationalVersion>
     </PropertyGroup>
 
     <ItemGroup>
@@ -20,6 +20,17 @@
              browser (cover art reads from /app/Assets via filesystem). -->
         <Content Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest"
                  Link="wwwroot/Assets/%(RecursiveDir)%(Filename)%(Extension)" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- The list cover design, shared with the Octo apps, with its fonts and painted
+             backgrounds, inside the assembly so no publish layout can lose them. The font
+             licence ships beside the app as the OFL asks. -->
+        <Content Remove="Services\CoverArt\Design\**\*.json" />
+        <EmbeddedResource Include="Services\CoverArt\Design\*.json" LogicalName="Octo.CoverDesign.%(Filename)%(Extension)" />
+        <EmbeddedResource Include="Services\CoverArt\Design\Fonts\*.ttf" LogicalName="Octo.CoverDesign.Fonts.%(Filename)%(Extension)" />
+        <EmbeddedResource Include="Services\CoverArt\Design\Backgrounds\*" LogicalName="Octo.CoverDesign.Backgrounds.%(Filename)%(Extension)" />
+        <None Include="Services\CoverArt\Design\Fonts\OFL.txt" Link="licenses/Inter-OFL.txt" CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
 
     <ItemGroup>

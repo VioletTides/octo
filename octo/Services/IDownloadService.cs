@@ -42,18 +42,29 @@ public interface IDownloadService
     /// which supplies a token unrelated to any HTTP request — that separation is the whole
     /// point, since a client giving up must never cancel a transfer slskd will finish.
     /// </summary>
+    /// <param name="requestedBy">
+    /// The users who asked for this track, for the history entry and the notification.
+    /// Empty when Octo started the acquisition itself or when attribution is switched off.
+    /// </param>
+    /// <param name="upgradeSearch">Search Soulseek the slow, wide way (Better quality, weekly upgrade).</param>
+    /// <param name="replacement">A library action's replacement, revealed in the original's place (W8).</param>
     Task<string> ExecuteAcquisitionAsync(string externalProvider, string externalId,
         bool triggerAlbumDownload, bool forcePermanent, DownloadSource? sourceOverride,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, IReadOnlyList<string>? requestedBy = null,
+        bool upgradeSearch = false, Octo.Services.Library.ReplacementHandoff? replacement = null);
 
     /// <summary>Runs one direct source for every missing track in an album.</summary>
     Task<bool> DownloadAlbumWithSourceAsync(string externalProvider, string albumExternalId,
-        DownloadSource source, bool suppressSummary, CancellationToken cancellationToken = default);
+        DownloadSource source, bool suppressSummary, CancellationToken cancellationToken = default,
+        IReadOnlyList<string>? requestedBy = null);
 
     /// <summary>
     /// Checks if a song is currently being downloaded
     /// </summary>
     DownloadInfo? GetDownloadStatus(string songId);
+
+    /// <summary>A transfer is running or finishing. The library Review sweep waits for none to be.</summary>
+    bool HasActiveDownloads => false;
     
     /// <summary>
     /// Gets the local path for a song if it has been downloaded already

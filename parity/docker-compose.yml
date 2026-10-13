@@ -1,0 +1,256 @@
+# Parity harness: one Octo build under test against a fixture Navidrome and stubs for every
+# upstream. Separate from the root docker-compose.yml. Run it through parity/parity.py
+# (README.md), or:
+#
+#   OCTO_IMAGE=ghcr.io/winters27/octo:2026.10.05 PARITY_PORT=18480 \
+#     docker compose -f parity/docker-compose.yml -p parity up -d
+#
+# OCTO_IMAGE   the build under test: the C# release (default) or the Rust image (octo-rust:dev)
+# PARITY_PORT  host port for Octo (default 18480); PARITY_ND_PORT for Navidrome (18453)
+# PARITY_ALT_PORT, PARITY_ALT_ADMIN_PORT  host ports of the second Octo, "octo-alt" (sign-in
+#              off, the dashboard on a port of its own); parity.py uses PARITY_PORT + 1 and + 2
+# PARITY_MUSIC the library folder; parity.py up makes a fresh writable copy of fixtures/music
+#              for every run (library edits, the trash and downloads write to it)
+#
+# Two runs can coexist under different project names (-p) and ports.
+#
+# Networking: everything but the gateway sits on `sandbox`, an internal network with no
+# route out, so no request can reach the real Deezer, GitHub, ... The `stubs` service holds
+# network aliases for every hard-coded HTTPS upstream and presents one certificate for all of
+# them, signed by the parity CA (certs/), which Octo trusts as its only root store.
+
+name: parity
+
+networks:
+  sandbox:
+    internal: true
+  edge: {}
+
+volumes:
+  octo-config: {}
+  octo-alt-config: {}
+  navidrome-data: {}
+
+services:
+  stubs:
+    image: python:3.13-alpine
+    command: ["python", "-u", "/stubs/stub_server.py"]
+    working_dir: /stubs
+    volumes:
+      - ./stubs:/stubs:ro
+      - ./certs:/certs:ro
+      # The slskd stub "downloads" a file by writing it into the job folder Octo asked for.
+      - ${PARITY_MUSIC:-./fixtures/music}:/music
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks:
+      sandbox:
+        # Keep in sync with certs/make-certs.sh.
+        aliases:
+          - api.deezer.com
+          - e-cdns-images.dzcdn.net
+          - cdn-images.dzcdn.net
+          - cdns-images.dzcdn.net
+          - itunes.apple.com
+          - is1-ssl.mzstatic.com
+          - musicbrainz.org
+          - coverartarchive.org
+          - api.acoustid.org
+          - acoustid.org
+          - ws.audioscrobbler.com
+          - www.last.fm
+          - lastfm.freetls.fastly.net
+          - lrclib.net
+          - lyrics.kugou.com
+          - mobileservice.kugou.com
+          - music.163.com
+          - api.lyrics.ovh
+          - api.github.com
+          - github.com
+          - api.listenbrainz.org
+          - ntfy.sh
+          - labs.api.listenbrainz.org
+          - accounts.spotify.com
+          - api.spotify.com
+          - open.spotify.com
+          # Plain http: the Soulseek port test, and octo-sonic (Sounds alike).
+          - tools.slsknet.org
+          - octo-sonic
+
+  navidrome:
+    image: deluan/navidrome:0.64.2
+    environment:
+      ND_MUSICFOLDER: /music
+      ND_DATAFOLDER: /data
+      ND_LOGLEVEL: warn
+      ND_SCANNER_SCHEDULE: "0"
+      ND_SCANNER_SCANONSTARTUP: "true"
+      ND_SCANNER_WATCHERWAIT: "0"
+      ND_ENABLEEXTERNALSERVICES: "false"
+      ND_ENABLEINSIGHTSCOLLECTOR: "false"
+      ND_LASTFM_ENABLED: "false"
+      ND_LISTENBRAINZ_ENABLED: "false"
+      ND_DEEZER_ENABLED: "false"
+      ND_AUTOIMPORTPLAYLISTS: "false"
+      ND_PASSWORDENCRYPTIONKEY: parity-fixed-key
+      # The corpus sends wrong passwords on purpose; the brute-force lockout would then
+      # refuse the right ones for a while.
+      ND_AUTHREQUESTLIMIT: "0"
+      # Creates the admin user `admin` on first start (setup.py adds the others).
+      ND_DEVAUTOCREATEADMINPASSWORD: parity-admin
+    volumes:
+      - ${PARITY_MUSIC:-./fixtures/music}:/music:ro
+      - navidrome-data:/data
+    mem_limit: 384m
+    networks: [sandbox]
+
+  # Puts state files from C# 2026.10.05 into Octo's config before it starts: the fetched songs
+  # the Afterglow palette and the downloads list read (Octo reads that file once at start).
+  config-seed:
+    image: python:3.13-alpine
+    command: ["sh", "-c", "cp /seed/* /config/ && chmod 666 /config/*"]
+    volumes:
+      - ./fixtures/config:/seed:ro
+      - octo-config:/config
+    mem_limit: 64m
+    networks: [sandbox]
+
+  octo:
+    image: ${OCTO_IMAGE:-ghcr.io/winters27/octo:2026.10.05}
+    depends_on:
+      stubs:
+        condition: service_healthy
+      navidrome:
+        condition: service_started
+      config-seed:
+        condition: service_completed_successfully
+    environment: &octo-env
+      ASPNETCORE_ENVIRONMENT: Production
+      TZ: UTC
+      # The parity CA is the only trusted root: honoured by OpenSSL (.NET on Linux) and by
+      # rustls-native-certs / rustls-platform-verifier (Rust).
+      SSL_CERT_FILE: /parity-ca/ca.crt
+      SSL_CERT_DIR: /parity-ca
+      Subsonic__Url: http://navidrome:4533
+      Subsonic__AdminUsername: admin
+      Subsonic__AdminPassword: parity-admin
+      Subsonic__AutoDetectDownloadPath: "true"
+      Subsonic__StorageMode: Stream
+      Subsonic__EnableSearchDiscovery: "true"
+      Subsonic__EnableExternalPlaylists: "false"
+      Subsonic__EnableSyncCatalog: "true"
+      Subsonic__SyncCatalogClients: Symfonium
+      Subsonic__WaitForLosslessOnPlay: "false"
+      Subsonic__DownloadOnPlay: "false"
+      Library__DownloadPath: /music
+      YouTube__ShimUrl: http://stubs:8090
+      Soulseek__BaseUrl: http://stubs:5030
+      Soulseek__Username: slskd
+      Soulseek__Password: slskd
+      Lidarr__BaseUrl: http://stubs:8686
+      Lidarr__ApiKey: parity-lidarr-key
+      # A Last.fm key turns on search discovery (track.search, stubbed). Radio stays off:
+      # stations and mixes are built in the background on timers, and that timing would
+      # leak into getPlaylists. See README "Not covered".
+      LastFm__ApiKey: parity-lastfm-key
+      LastFm__ApiSecret: ""
+      LastFm__EnableRadio: "false"
+      LastFm__EnablePersonalizedStations: "false"
+      LastFm__EnableDiscoveryStations: "false"
+      LastFm__ExposeRadioAsPlaylists: "false"
+      LastFm__ExposeRadioAsStreams: "false"
+      Metadata__FetchLyrics: "true"
+      Metadata__LyricsSources: "song,kugou,lrclib,netease,lyricsovh"
+      GeneratedPlaylists__Enabled: "false"
+      LibraryActions__Enabled: "false"
+      Updates__Check: "false"
+      Notifications__NtfyUrl: ""
+      Notifications__DiscordWebhookUrl: ""
+      # Secrets that do nothing in this stack (no ntfy address, no listener named ghost), so the
+      # admin API's masking shows for each kind of secret (14-settings-media).
+      Notifications__NtfyToken: parity-ntfy-token
+      LastFm__UserSessions__ghost__SessionKey: parity-lastfm-session-ghost
+      LastFm__UserSessions__ghost__LastFmUser: ghost-on-lastfm
+      ListenBrainz__UserTokens__ghost: parity-lb-ghost-token
+      # Downloads (13-downloads, 95-acquisition): the deny list and the AcoustID check run, the
+      # fixture FLAC (0.9 MB) is big enough to be a whole song, and songs are filed by artist and
+      # album.
+      Soulseek__VerifyDownloads: "true"
+      Soulseek__AcoustIdApiKey: parity-acoustid-key
+      Soulseek__MinFileSizeBytes: "700000"
+      Subsonic__FolderStructure: Organized
+      # Sharing (18-dashboard): what the slskd stub's slskd.yml already holds, so the share
+      # switch's startup check only reads and then sleeps for 10 minutes.
+      Soulseek__ShareLibrary: "true"
+      Soulseek__SharedFolders: "[Music]/music"
+      Soulseek__CheckListenPort: "true"
+      # Imports (12-imports): a Spotify app id (PKCE, not a secret), and the trickle and the
+      # list refresh off, so nothing is fetched or read again on a timer.
+      Imports__SpotifyClientId: parity-spotify-client
+      Imports__SongsPerHour: "0"
+      Imports__RefreshHours: "0"
+      # Library actions are switched on and off by 19-health and 20-library-edits through the
+      # settings API; their playlists stay off, so getPlaylists never creates them meanwhile.
+      LibraryActions__PlaylistsEnabled: "false"
+      # Sounds alike asks the octo-sonic stub, with no pause between songs (15-radio). Popular
+      # right now and New Releases are switched on by 16-lists only: built at start, they would
+      # race 05-playlists' first getPlaylists.
+      RadioSources__SonicUrl: http://octo-sonic
+      RadioSources__SonicPauseSeconds: "0"
+      GeneratedPlaylists__PopularNow: "false"
+      # Rust only (the charts plan): no list beyond Popular right now, as in the C#.
+      GeneratedPlaylists__Charts: ""
+      GeneratedPlaylists__NewReleases: "false"
+    volumes:
+      - ./certs/ca.crt:/parity-ca/ca.crt:ro
+      - ${PARITY_MUSIC:-./fixtures/music}:/music
+      - octo-config:/app/config
+      # Songs with planted problems that 19-health and 20-library-edits copy into the library.
+      - ./fixtures/planted:/parity-planted:ro
+    # 1 GB, not 768 MB: 12-imports/cap-zip-too-big-unpacked makes the C# build hold the zip's
+    # 256 MB of text as one string, and under 768 MB (a .NET heap of about 576 MB) that ran out
+    # of memory now and then (a 500 instead of the 400).
+    mem_limit: 1g
+    networks: [sandbox]
+
+  # The same Octo with the dashboard sign-in off and the dashboard on a port of its own
+  # (Admin__Port): its main port (8080) answers 404 for /admin and /api/admin, its admin port
+  # (8081) answers 404 for everything else. Own config volume; same library, Navidrome and stubs.
+  octo-alt:
+    image: ${OCTO_IMAGE:-ghcr.io/winters27/octo:2026.10.05}
+    depends_on:
+      stubs:
+        condition: service_healthy
+      navidrome:
+        condition: service_started
+    environment:
+      <<: *octo-env
+      Admin__SignIn: "off"
+      Admin__Port: "8081"
+      # No Spotify app, and a redirect Spotify refuses: the import page's "not set up" answers.
+      Imports__SpotifyClientId: ""
+      Imports__SpotifyRedirectUri: http://localhost/callback
+    volumes:
+      - ./certs/ca.crt:/parity-ca/ca.crt:ro
+      - ${PARITY_MUSIC:-./fixtures/music}:/music:ro
+      - octo-alt-config:/app/config
+    mem_limit: 512m
+    networks: [sandbox]
+
+  gateway:
+    image: python:3.13-alpine
+    command: ["python", "-u", "/stubs/gateway.py", "8080:octo:8080", "4533:navidrome:4533",
+              "8081:octo-alt:8080", "8082:octo-alt:8081"]
+    volumes:
+      - ./stubs:/stubs:ro
+    ports:
+      - "127.0.0.1:${PARITY_PORT:-18480}:8080"
+      - "127.0.0.1:${PARITY_ND_PORT:-18453}:4533"
+      - "127.0.0.1:${PARITY_ALT_PORT:-18481}:8081"
+      - "127.0.0.1:${PARITY_ALT_ADMIN_PORT:-18482}:8082"
+    mem_limit: 64m
+    networks: [sandbox, edge]

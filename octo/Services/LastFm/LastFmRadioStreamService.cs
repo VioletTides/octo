@@ -44,7 +44,8 @@ public sealed class LastFmRadioStreamService
         IRadioTuneInSelector tuneIn,
         ILogger<LastFmRadioStreamService> logger,
         LastFmService? lastFm = null,
-        Octo.Services.ListenBrainz.ListenBrainzService? listenBrainz = null)
+        Octo.Services.ListenBrainz.ListenBrainzService? listenBrainz = null,
+        LastFmScrobbleService? lastFmScrobbles = null)
     {
         _state = state; _settings = settings; _library = library; _proxy = proxy;
         _downloads = downloads; _transcoder = transcoder; _cache = cache;
@@ -53,9 +54,11 @@ public sealed class LastFmRadioStreamService
         _queues = queues; _refreshQueue = refreshQueue; _tuneIn = tuneIn; _logger = logger;
         _lastFm = lastFm;
         _listenBrainz = listenBrainz;
+        _lastFmScrobbles = lastFmScrobbles;
     }
 
     private readonly Octo.Services.ListenBrainz.ListenBrainzService? _listenBrainz;
+    private readonly LastFmScrobbleService? _lastFmScrobbles;
 
     public LastFmRadioStation? Resolve(LastFmRadioStreamSession session)
     {
@@ -407,8 +410,9 @@ public sealed class LastFmRadioStreamService
         return tags.Select(LastFmRadioRecommendationService.CanonicalTag)
             .Where(tag => tag.Length > 0
                 && !tag.Equals(artistTag, StringComparison.OrdinalIgnoreCase)
-                && !(tag.Length == 4 && tag.All(char.IsAsciiDigit))
-                && !tag.EndsWith("0s", StringComparison.Ordinal))
+                // One year rule, shared with the genre normaliser. Two hand-rolled copies is
+                // how one of them quietly stops dropping "2020s" when someone fixes the other.
+                && !Octo.Services.Metadata.GenreNormalizer.IsYearLike(tag))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(8)
             .ToList();
@@ -427,7 +431,7 @@ public sealed class LastFmRadioStreamService
     /// loudness range, texture as spectral flatness (loudness itself is not a term
     /// because every track has been brought to the same level). Kinship: one minus the
     /// overlap of their Last.fm tags, the catalogue genre when tags are missing, and a
-    /// neutral middle when nothing is known so an unmeasured track is neither favoured
+    /// neutral middle when nothing is known so an unmeasured track is neither favored
     /// nor punished.
     /// </summary>
     internal static double FlowDistance(RadioAudioProfile current, RadioAudioProfile next)
@@ -567,6 +571,12 @@ public sealed class LastFmRadioStreamService
             if (_listenBrainz is not null)
                 _ = _listenBrainz.SubmitListenAsync(session.Username, track.Artist, track.Title,
                     track.Album, track.Duration ?? song.Duration, DateTime.UtcNow);
+            // Last.fm dates a scrobble from when the song started, and this one just ended.
+            // The station picked it, not the listener, and Last.fm is told as much.
+            var duration = track.Duration ?? song.Duration;
+            _lastFmScrobbles?.Scrobble(session.Username,
+                new LastFmTrack(track.Artist, track.Title, track.Album, duration),
+                DateTime.UtcNow.AddSeconds(-(duration ?? 0)), chosenByUser: false);
             return;
         }
         var parameters = session.Authentication.ToDictionary(pair => pair.Key, pair => pair.Value,

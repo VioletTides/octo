@@ -46,6 +46,29 @@ public interface ILocalLibraryService
     /// e.g. after each track of an album download so the album fills in progressively
     /// and the final tracks are never left stranded by a swallowed trigger.
     /// </param>
+    /// <summary>
+    /// Every download Octo has a record of. The genre backfill uses this to scope a run to
+    /// files Octo itself created, which is the only scope where rewriting a tag is rewriting
+    /// our own output rather than someone's hand-curated rip.
+    /// </summary>
+    Task<IReadOnlyList<LocalSongMapping>> GetMappingsAsync();
+
+    /// <summary>
+    /// The mapping whose tags match, or null when there is no match OR more than one.
+    /// Ambiguity is a failure, not a coin flip: this feeds a delete, and picking arbitrarily
+    /// between two candidates is how you delete the wrong one.
+    /// </summary>
+    Task<LocalSongMapping?> FindMappingByTagsAsync(string? artist, string? title, string? album);
+
+    /// <summary>Drop the mapping for a path Octo no longer owns, so a re-acquire is not
+    /// short-circuited by a file that has just been moved out of the library. Answers the
+    /// mappings it dropped, so a song put back can have them again.</summary>
+    Task<IReadOnlyList<LocalSongMapping>> ForgetMappingAsync(string localPath);
+
+    /// <summary>Puts back mappings a removal dropped, pointing at the song's path again. A song
+    /// mapped anew since keeps its newer mapping.</summary>
+    Task RestoreMappingsAsync(IReadOnlyList<LocalSongMapping> mappings, string localPath);
+
     Task<bool> TriggerLibraryScanAsync(bool force = false);
     
     /// <summary>

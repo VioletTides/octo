@@ -1,0 +1,134 @@
+{
+  "description": "How `parity.py diff` puts a diff on a backlog group (docs/rust-port/BACKLOG.md). Each request carries its group in the corpus (\"backlog\", default \"base\": behavior the Rust port had at 2026.10.04). These rules come first: a rule takes a whole differing aspect (status, body, header:<name>) when it has no \"match\", or the single diff lines its \"match\" regex finds. Whatever no rule takes falls to the request's own group. One request can count in several groups.",
+  "rules": [
+    {
+      "backlog": "J",
+      "aspects": [
+        "header:x-frame-options",
+        "header:content-security-policy",
+        "header:referrer-policy",
+        "header:x-content-type-options"
+      ],
+      "why": "the security headers on every admin answer (AdminSignInGate.UseAdminSecurityHeaders)"
+    },
+    {
+      "backlog": "J",
+      "aspects": [
+        "header:cache-control",
+        "header:expires",
+        "header:pragma"
+      ],
+      "match": "no-store",
+      "why": "admin answers are never cached"
+    },
+    {
+      "backlog": "J",
+      "aspects": [
+        "header:set-cookie"
+      ],
+      "match": "octo_browse",
+      "why": "the gate refreshes the sign-in cookie on every signed-in admin call"
+    },
+    {
+      "backlog": "J",
+      "aspects": [
+        "body"
+      ],
+      "match": "signIn|\\$\\.recovery|signInOff|\\$\\.user\\b|Sign in to Octo",
+      "why": "the gate's 401 and the browse/session fields"
+    },
+    {
+      "backlog": "P",
+      "aspects": [
+        "body"
+      ],
+      "match": "explicitStatus|explicit",
+      "why": "explicit or clean on outside songs and albums"
+    },
+    {
+      "backlog": "O",
+      "aspects": [
+        "body"
+      ],
+      "match": "ownedCount|owned",
+      "why": "outside albums the library holds"
+    },
+    {
+      "backlog": "L",
+      "aspects": [
+        "body"
+      ],
+      "match": "octoSuggestedBy|octoRadioSources|RadioSources|\\bsonic\\b|Sonic",
+      "why": "radio sources and Sounds alike"
+    },
+    {
+      "backlog": "G",
+      "aspects": [
+        "body"
+      ],
+      "match": "octoTopSongs|topSongs|TopSongs",
+      "why": "top songs ranked by Octo"
+    },
+    {
+      "backlog": "Q",
+      "aspects": [
+        "body"
+      ],
+      "match": "octoLists|Made for you|Popular right now|Deep Cuts|Rediscover|New Releases",
+      "why": "Made for you and Popular right now lists"
+    },
+    {
+      "backlog": "D",
+      "aspects": [
+        "body"
+      ],
+      "match": "octoAcquisitions",
+      "why": "the acquisitions extension at versions 1 and 2"
+    },
+    {
+      "backlog": "H",
+      "aspects": [
+        "body"
+      ],
+      "match": "octoImports",
+      "why": "the imports extension"
+    },
+    {
+      "backlog": "K",
+      "requests": [
+        "08-catchall-native/root*"
+      ],
+      "aspects": [
+        "status",
+        "header:location",
+        "body"
+      ],
+      "why": "the bare address sends to the web app (#80)"
+    },
+    {
+      "backlog": "B",
+      "aspects": [
+        "header:content-disposition"
+      ],
+      "why": "a relayed download keeps the file name Navidrome gave it (0a700c0)"
+    },
+    {
+      "backlog": "G",
+      "requests": [
+        "02-browsing/top-songs-*"
+      ],
+      "aspects": [
+        "header:vary"
+      ],
+      "why": "getTopSongs is answered by Octo, not relayed (3d5bea4)"
+    },
+    {
+      "backlog": "F",
+      "aspects": [
+        "body"
+      ],
+      "match": "this server knows|libraryActions\\.(admin|actions)",
+      "why": "the library actions the apps can ask for (374dac8)"
+    }
+  ]
+}

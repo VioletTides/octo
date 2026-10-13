@@ -8,6 +8,7 @@ using Octo.Models.Domain;
 using Octo.Models.Radio;
 using Octo.Models.Settings;
 using Octo.Services.LastFm;
+using Octo.Services.Radio;
 using Octo.Services.Soulseek;
 using Octo.Services.Subsonic;
 using Octo.Services;
@@ -20,27 +21,8 @@ namespace Octo.Tests;
 
 public class LastFmRadioCoreTests
 {
-    [Fact]
-    public void RadioStationCovers_KeepLogoAcrossConcurrentFirstRequests()
-    {
-        var service = new CoverArtService(new Mock<ILogger<CoverArtService>>().Object);
-        var covers = Enumerable.Range(0, 16).AsParallel().WithDegreeOfParallelism(8)
-            .Select(index => service.GetRadioStationCover($"Station {index}"))
-            .ToList();
-
-        Assert.All(covers, bytes =>
-        {
-            using var image = Image.Load<Rgb24>(bytes);
-            var logoPixels = 0;
-            for (var y = 78; y < 378; y++)
-            for (var x = 150; x < 450; x++)
-            {
-                var pixel = image[x, y];
-                if (pixel.R > 40 || pixel.B > 40) logoPixels++;
-            }
-            Assert.True(logoPixels > 1_000, $"Expected Octo logo; found {logoPixels} colored pixels");
-        });
-    }
+    // RadioStationCovers_StayPlainAcrossConcurrentFirstRequests (ListCoverTests.cs) replaces the
+    // old centred-logo check: a station's cover is its designed cover, with no Octo mark.
 
     [Theory]
     [InlineData("Beyoncé feat. Jay-Z", "Beyoncé")]
@@ -84,6 +66,58 @@ public class LastFmRadioCoreTests
         Assert.Equal(7, settings.EffectiveHistoryRetentionDays);
         Assert.Equal(100, settings.EffectiveRadioTrackCount);
         Assert.Equal(0, settings.EffectiveDiscoveryPercent);
+    }
+
+    [Theory]
+    [InlineData(-3, 0)]
+    [InlineData(0, 0)]
+    [InlineData(2, 2)]
+    [InlineData(99, 5)]
+    public void StationCounts_AreClampedAtReadTime(int configured, int effective)
+    {
+        var settings = new LastFmSettings
+            { ArtistStationCount = configured, GenreStationCount = configured };
+        Assert.Equal(effective, settings.EffectiveArtistStationCount);
+        Assert.Equal(effective, settings.EffectiveGenreStationCount);
+    }
+
+    /// <summary>
+    /// The refresh worker refuses to replace a user's stations with an empty build, because
+    /// an empty build normally means the provider failed. Once every station type can be
+    /// switched off, empty is also what the user asked for, and the worker needs to tell
+    /// the two apart or turning everything off throws and reads as an outage.
+    /// </summary>
+    [Fact]
+    public void StationsExplicitlyEmpty_ExcusesOnlyAnAllKindsOffConfiguration()
+    {
+        var allOff = new LastFmSettings
+        {
+            EnablePersonalizedStations = true, EnableYourMix = false, EnableDiscoveryMix = false,
+            ArtistStationCount = 0, GenreStationCount = 0, EnableDiscoveryStations = false,
+        };
+        Assert.True(allOff.StationsExplicitlyEmpty);
+
+        Assert.False(new LastFmSettings().StationsExplicitlyEmpty);
+
+        var onlyGenre = new LastFmSettings
+        {
+            EnablePersonalizedStations = true, EnableYourMix = false, EnableDiscoveryMix = false,
+            ArtistStationCount = 0, GenreStationCount = 1, EnableDiscoveryStations = false,
+        };
+        Assert.False(onlyGenre.StationsExplicitlyEmpty);
+
+        // A pinned station still counts, so an empty build is still a provider failure.
+        var pinnedSurvives = new LastFmSettings
+        {
+            EnablePersonalizedStations = true, EnableYourMix = false, EnableDiscoveryMix = false,
+            ArtistStationCount = 0, GenreStationCount = 0, EnableDiscoveryStations = true,
+            DiscoveryStations = [new() { Id = "rock", Name = "Rock", Tags = ["rock"] }],
+        };
+        Assert.False(pinnedSurvives.StationsExplicitlyEmpty);
+
+        // Every configuration that predates the per-type settings keeps the old guard.
+        var personalizedOff = new LastFmSettings { EnablePersonalizedStations = false };
+        Assert.False(personalizedOff.StationsExplicitlyEmpty);
     }
 
     [Theory]
@@ -296,6 +330,14 @@ public class LastFmRadioCoreTests
         Assert.Null(settings.TokenFor("bob"));
     }
 
+    [Theory]
+    [InlineData("favourites")]
+    [InlineData("Favourite Songs")]
+    [InlineData("favorites")]
+    [InlineData("favorite song")]
+    public void BookkeepingTags_AreNotGenres_InEitherSpelling(string tag) =>
+        Assert.Equal("", LastFmRadioRecommendationService.CanonicalTag(tag));
+
     [Fact]
     public void KinshipTags_DropYearsTheArtistAndBookkeeping()
     {
@@ -386,15 +428,34 @@ public class LastFmRadioTrackResolverTests
         Assert.Same(expected, song);
     }
 
+    [Fact]
+    public async Task Resolver_KeepsTheVideoASourceNamed_WithoutReplacingOneAlreadyFound()
+    {
+        var handler = new DelegateHandler(_ =>
+            "{\"subsonic-response\":{\"status\":\"ok\",\"searchResult3\":{\"song\":[]}}}");
+        var registry = new ExternalIdRegistry();
+        var id = registry.Register(new SoulseekRouting { Artist = "A", Title = "T", Duration = 180 });
+        var metadata = new Mock<IMusicMetadataService>();
+        metadata.Setup(service => service.SearchSongsByArtistTitleAsync("A", "T", 1, 180))
+            .ReturnsAsync([new Song { Id = id, Artist = "A", Title = "T", IsLocal = false }]);
+        var resolver = Resolver(handler, metadata.Object, registry);
+
+        await resolver.ResolveAsync("A", "T", 180, new Dictionary<string, string>(), default, "video-1");
+        Assert.Equal("video-1", registry.Lookup(id)!.YouTubeId);
+
+        await resolver.ResolveAsync("A", "T", 180, new Dictionary<string, string>(), default, "video-2");
+        Assert.Equal("video-1", registry.Lookup(id)!.YouTubeId);
+    }
+
     private static LastFmRadioTrackResolver Resolver(HttpMessageHandler handler,
-        IMusicMetadataService metadata)
+        IMusicMetadataService metadata, ExternalIdRegistry? registry = null)
     {
         var factory = new Mock<IHttpClientFactory>();
         factory.Setup(item => item.CreateClient(It.IsAny<string>())).Returns(new HttpClient(handler));
         var proxy = new SubsonicProxyService(factory.Object,
             TestOptions.Monitor(new SubsonicSettings { Url = "http://navidrome.test" }),
             new HttpContextAccessor { HttpContext = new DefaultHttpContext() });
-        return new LastFmRadioTrackResolver(proxy, metadata, new ExternalIdRegistry(),
+        return new LastFmRadioTrackResolver(proxy, metadata, registry ?? new ExternalIdRegistry(),
             new Mock<ILogger<LastFmRadioTrackResolver>>().Object);
     }
 
@@ -792,6 +853,81 @@ public class LastFmRadioRecommendationTests
     }
 
     [Fact]
+    public async Task OneStar_KeepsASongOffEveryStationAndAnyOtherRatingLiftsIt()
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-ban-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var settings = TestOptions.Monitor(new LastFmSettings { ApiKey = "key", MinimumPlays = 3, RadioTrackCount = 10 });
+            var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
+                new ExternalIdRegistry(), new Mock<ILogger<LastFmRadioStateStore>>().Object);
+            for (var index = 0; index < 3; index++) state.RecordPlay("alice", new LastFmRadioPlay
+            {
+                Artist = "Fresh", Title = "Fresh Seed " + index, Genre = "Electronica",
+                PlayedAtUtc = DateTime.UtcNow.AddDays(-20).AddHours(-index)
+            });
+            Assert.True(state.SetRadioBan("alice", "id-0", "Similar Artist 0", "similar-0", banned: true));
+            Assert.Contains(LastFmRadioSeedNormalizer.TrackKey("Similar Artist 0", "similar-0"), state.RadioBanKeys("alice"));
+            var service = RecommendationService(settings, state, new RecommendationHandler());
+            var stations = await service.BuildAsync("alice");
+            Assert.NotEmpty(stations.SelectMany(station => station.Tracks));
+            Assert.DoesNotContain(stations.SelectMany(station => station.Tracks),
+                track => track.Title == "similar-0" && track.Artist == "Similar Artist 0");
+
+            Assert.True(state.SetRadioBan("alice", "id-0", "Similar Artist 0", "similar-0", banned: false));
+            Assert.Empty(state.GetUser("alice").RadioBans);
+            Assert.False(state.SetRadioBan("alice", "id-0", "Similar Artist 0", "similar-0", banned: false));
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    [Fact]
+    public void OneStar_PullsTheSongFromTheStationsItIsOnNow()
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-ban-now-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var settings = TestOptions.Monitor(new LastFmSettings { ApiKey = "key" });
+            var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
+                new ExternalIdRegistry(), new Mock<ILogger<LastFmRadioStateStore>>().Object);
+            state.ReplaceStations("alice", [new LastFmRadioStation
+            {
+                Id = "s1", Key = "your-mix", Name = "Your Mix", Owner = "alice",
+                Tracks = [new() { Artist = "A", Title = "Keep" }, new() { Artist = "B", Title = "Gone" }],
+            }]);
+            Assert.True(state.SetRadioBan("alice", "id-b", "B", "Gone", banned: true));
+            Assert.Equal(["Keep"], Assert.Single(state.GetUser("alice").Stations).Tracks.Select(track => track.Title));
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task ArtistStation_SpreadsItsArtistsAcrossTheFirstFiveSongs()
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-gap-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var settings = TestOptions.Monitor(new LastFmSettings { ApiKey = "key", MinimumPlays = 3, RadioTrackCount = 10 });
+            var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
+                new ExternalIdRegistry(), new Mock<ILogger<LastFmRadioStateStore>>().Object);
+            for (var index = 0; index < 3; index++) state.RecordPlay("alice", new LastFmRadioPlay
+            {
+                Artist = "Fresh", Title = "Fresh Seed " + index, Genre = "Electronica",
+                PlayedAtUtc = DateTime.UtcNow.AddDays(-20).AddHours(-index)
+            });
+            var service = RecommendationService(settings, state, new RecommendationHandler());
+            var stations = await service.BuildAsync("alice");
+            var fresh = Assert.Single(stations, station =>
+                station.Kind == LastFmRadioStationKind.Artist && station.Name == "Fresh Radio");
+            Assert.Equal(5, fresh.Tracks.Take(5).Select(track => track.Artist.ToLowerInvariant()).Distinct().Count());
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    [Fact]
     public async Task Refresh_DrawsADifferentSnapshotAndRotatesAwayFromThePreviousOne()
     {
         var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-rot-" + Guid.NewGuid());
@@ -998,6 +1134,179 @@ public class LastFmRadioRecommendationTests
         }
         finally { try { Directory.Delete(directory, true); } catch { } }
     }
+
+    /// <summary>
+    /// Each dynamic station type is configured on its own (issue #39). Before this the
+    /// four types shared one switch and the counts were literals in BuildAsync, so a
+    /// listener who wanted Your Mix also got an artist radio per favorite band.
+    /// </summary>
+    [Fact]
+    public async Task StationTypeToggles_BuildOnlyTheEnabledKinds()
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-kinds-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var settings = TestOptions.Monitor(Learned());
+            var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
+                new ExternalIdRegistry(), new Mock<ILogger<LastFmRadioStateStore>>().Object);
+            for (var index = 0; index < 12; index++) state.RecordPlay("alice", new LastFmRadioPlay
+                { Artist = "Artist " + index % 3, Title = "T" + index, Genre = "rock" });
+            var service = RecommendationService(settings, state, new RecommendationHandler());
+
+            var all = await service.BuildAsync("alice");
+            Assert.Contains(all, station => station.Kind == LastFmRadioStationKind.Artist);
+            Assert.Contains(all, station => station.Kind == LastFmRadioStationKind.Genre);
+
+            var trimmed = Learned();
+            trimmed.EnableYourMix = false;
+            trimmed.ArtistStationCount = 0;
+            trimmed.GenreStationCount = 0;
+            settings.Set(trimmed);
+
+            var discoveryOnly = await service.BuildAsync("alice");
+            Assert.DoesNotContain(discoveryOnly, station => station.Kind == LastFmRadioStationKind.Artist);
+            Assert.DoesNotContain(discoveryOnly, station => station.Kind == LastFmRadioStationKind.Genre);
+            Assert.DoesNotContain(discoveryOnly, station => station.Kind == LastFmRadioStationKind.YourMix
+                || station.Kind == LastFmRadioStationKind.Starter);
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task ArtistStationCount_DecidesHowManyArtistRadiosAreBuilt()
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-count-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var one = Learned();
+            one.ArtistStationCount = 1;
+            one.GenreStationCount = 0;
+            var settings = TestOptions.Monitor(one);
+            var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
+                new ExternalIdRegistry(), new Mock<ILogger<LastFmRadioStateStore>>().Object);
+            for (var index = 0; index < 12; index++) state.RecordPlay("alice", new LastFmRadioPlay
+                { Artist = "Artist " + index % 3, Title = "T" + index, Genre = "rock" });
+            var service = RecommendationService(settings, state, new RecommendationHandler());
+
+            var stations = await service.BuildAsync("alice");
+            Assert.Single(stations, station => station.Kind == LastFmRadioStationKind.Artist);
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    /// <summary>A radio source for station tests: always the same answer, or one that never comes.</summary>
+    private sealed class StationSource(string provider, RadioMatch match, int count, double score = 1, bool hangs = false)
+        : IRadioSource
+    {
+        public string Provider => provider;
+        public bool Available => true;
+        public System.Collections.Concurrent.ConcurrentQueue<RadioSeed> Asked { get; } = new();
+
+        public async Task<RadioAnswer> SongsLikeAsync(RadioSeed seed, int requested,
+            IReadOnlyDictionary<string, string> auth, CancellationToken ct)
+        {
+            Asked.Enqueue(seed);
+            if (hangs) await Task.Delay(Timeout.Infinite, ct);
+            return new RadioAnswer(provider, match, Enumerable.Range(0, count)
+                .Select(i => new LastFmService.SimilarTrack($"{provider} artist {i}", $"{provider} song {i} for {seed.Title}",
+                    score, 180, Provider: provider)).ToList(), []);
+        }
+    }
+
+    private static (LastFmRadioRecommendationService Service, LastFmRadioStateStore State, string Directory) WithSources(
+        params IRadioSource[] extra)
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "octo-radio-sources-" + Guid.NewGuid());
+        Directory.CreateDirectory(directory);
+        var settings = TestOptions.Monitor(Learned());
+        var state = new LastFmRadioStateStore(System.IO.Path.Combine(directory, "state.json"), settings,
+            new ExternalIdRegistry(), new Mock<ILogger<LastFmRadioStateStore>>().Object);
+        for (var index = 0; index < 12; index++) state.RecordPlay("alice", new LastFmRadioPlay
+            { Artist = "Artist " + index % 3, Title = "T" + index, Genre = "rock" });
+        var lastFm = new LastFmService(new HttpClient(new RecommendationHandler()), settings,
+            Options.Create(new MetadataSettings { Language = "en" }), new Mock<ILogger<LastFmService>>().Object);
+        var sources = new RadioSourceSet([new LastFmRadioSource(lastFm), .. extra],
+            TestOptions.Monitor(new RadioSourceSettings()), new Mock<ILogger<RadioSourceSet>>().Object)
+            { SourceTimeout = TimeSpan.FromMilliseconds(200) };
+        var service = new LastFmRadioRecommendationService(lastFm, state, settings,
+            new Mock<ILogger<LastFmRadioRecommendationService>>().Object, sources);
+        return (service, state, directory);
+    }
+
+    [Fact]
+    public async Task YourMix_DrawsOnEverySource_AndRemembersWhichSuggestedEachSong()
+    {
+        var (service, _, directory) = WithSources(
+            new StationSource(RadioProvider.YouTubeMusic, RadioMatch.Song, 15),
+            // A count of shared sessions, as ListenBrainz scores: ranked by position, it cannot swamp the rest.
+            new StationSource(RadioProvider.ListenBrainz, RadioMatch.Song, 15, score: 216));
+        try
+        {
+            var mix = (await service.BuildAsync("alice")).Single(station => station.Kind == LastFmRadioStationKind.YourMix);
+            // This fake's Last.fm answers every seed with the same 15 songs, so whether one of them
+            // is drawn is chance; the sources that answer each seed differently always are.
+            var sources = mix.Tracks.Select(track => track.Source).ToHashSet();
+            Assert.Contains(RadioProvider.YouTubeMusic, sources);
+            Assert.Contains(RadioProvider.ListenBrainz, sources);
+            Assert.Subset(new HashSet<string> { RadioProvider.LastFm, RadioProvider.YouTubeMusic, RadioProvider.ListenBrainz, RadioProvider.History }, sources);
+            Assert.All(mix.Tracks.Where(track => track.Title.StartsWith("T", StringComparison.Ordinal) && track.Artist.StartsWith("Artist ")),
+                track => Assert.Equal(RadioProvider.History, track.Source));
+            Assert.True(mix.Tracks.Count(track => track.Source == RadioProvider.ListenBrainz) < mix.Tracks.Count / 2,
+                "ListenBrainz's large scores do not take over the mix");
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task ASourceThatNeverAnswers_DoesNotStopTheStations()
+    {
+        var (service, _, directory) = WithSources(new StationSource(RadioProvider.YouTubeMusic, RadioMatch.Song, 10, hangs: true));
+        try
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var stations = await service.BuildAsync("alice");
+            Assert.Contains(stations, station => station.Kind == LastFmRadioStationKind.YourMix && station.Tracks.Count > 0);
+            Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"took {watch.Elapsed}");
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task AnArtistStation_AsksTheOtherSources_NotLastFmAgain()
+    {
+        var lastFm = new StationSource(RadioProvider.LastFm, RadioMatch.Song, 5);
+        var ytm = new StationSource(RadioProvider.YouTubeMusic, RadioMatch.Song, 10);
+        var (service, _, directory) = WithSources(lastFm, ytm);
+        try
+        {
+            await service.BuildAsync("alice");
+            // An artist station's seed has no title; Last.fm answered it with its own top tracks.
+            Assert.Contains(ytm.Asked, seed => seed.Title.Length == 0);
+            Assert.DoesNotContain(lastFm.Asked, seed => seed.Title.Length == 0);
+        }
+        finally { try { Directory.Delete(directory, true); } catch { } }
+    }
+
+    [Theory]
+    [InlineData("youtube-music:tag:trip hop", "tag:trip hop")]
+    [InlineData("tag:trip hop", "tag:trip hop")]
+    [InlineData("lastfm:massive attack - teardrop", "massive attack - teardrop")]
+    [InlineData("listenbrainz:artist:Portishead", "artist:Portishead")]
+    [InlineData("history", "history")]
+    [InlineData("artist:Sunn O))): live", "artist:Sunn O))): live")]
+    public void ASeedsListsFromEverySource_AreOneSeed(string source, string group) =>
+        Assert.Equal(group, LastFmRadioRecommendationService.SeedGroup(source));
+
+    /// <summary>Enough plays that BuildAsync takes the learned branch and builds all four kinds.
+    /// The key has to be set: without one LastFmService short-circuits every tag lookup, so
+    /// the discovery and genre stations have nothing to be built from.</summary>
+    private static LastFmSettings Learned() => new()
+    {
+        ApiKey = "test-key", EnablePersonalizedStations = true, EnableDiscoveryStations = false,
+        MinimumPlays = 3,
+    };
 
     private static LastFmRadioRecommendationService RecommendationService(
         TestOptionsMonitor<LastFmSettings> settings, LastFmRadioStateStore state,

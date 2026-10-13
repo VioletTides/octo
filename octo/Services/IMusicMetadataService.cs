@@ -39,11 +39,20 @@ public interface IMusicMetadataService
         => Task.CompletedTask;
 
     /// <summary>
+    /// Gives external songs outside a search (station playlists) the lengths already known
+    /// for them, and looks the rest up in the background so the next response has them.
+    /// Never waits on the network: whatever is not known yet keeps the fallback for now.
+    /// </summary>
+    void CompleteSongLengths(IReadOnlyList<Song> songs) { }
+
+    /// <summary>
     /// Resolves the real YouTube video (and its duration) for the top of a search
     /// result so the shown length matches the audio that plays. Bounded + cached;
-    /// also stores the videoId so playback reuses the same video.
+    /// also stores the videoId so playback reuses the same video. When <paramref name="background"/>
+    /// is true the songs are already sent: only the routing is written, a video a play already
+    /// pinned is kept, and the shim's background lane is used.
     /// </summary>
-    Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default)
+    Task ResolveTopDurationsAsync(List<Song> songs, CancellationToken ct = default, bool background = false)
         => Task.CompletedTask;
 
     /// <summary>
@@ -111,6 +120,22 @@ public interface IMusicMetadataService
     /// Gets an artist's albums
     /// </summary>
     Task<List<Album>> GetArtistAlbumsAsync(string externalProvider, string externalId);
+
+    /// <summary>
+    /// Gets an artist's albums for a library artist's page. The library's album titles say
+    /// which of two artists of one name is meant; a provider that cannot use them ignores them.
+    /// </summary>
+    Task<List<Album>> GetArtistAlbumsAsync(string externalProvider, string externalId,
+        IReadOnlyCollection<string>? libraryAlbumTitles)
+        => GetArtistAlbumsAsync(externalProvider, externalId);
+
+    /// <summary>
+    /// Gets an artist's albums with only the track counts already known, asking the catalog
+    /// for none: for counts shown beside an artist's page, whose own album list asks for the
+    /// missing ones at the same moment. A provider with no such lookup answers the plain list.
+    /// </summary>
+    Task<List<Album>> GetArtistAlbumsKnownCountsAsync(string externalProvider, string externalId)
+        => GetArtistAlbumsAsync(externalProvider, externalId);
     
     /// <summary>
     /// Searches for playlists on external providers

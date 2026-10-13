@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Join Octo Family</title>
+  <link rel="stylesheet" href="/admin/admin.css" />
+  <link rel="stylesheet" href="/family/family.css" />
+  <link rel="icon" type="image/png" href="/Assets/octo_logo.png" />
+  <link rel="preconnect" href="https://rsms.me" />
+  <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+</head>
+<body class="fam fam-join">
+  <div class="ambient" aria-hidden="true"><span class="ambient-light a1"></span><span class="ambient-light a2"></span><span class="ambient-light a3"></span></div>
+  <div class="fam-join-shell">
+    <header class="sidebar-brand fam-solo-brand">
+      <img src="/Assets/octo_logo.png" alt="" class="sidebar-logo" />
+      <div class="sidebar-brand-text">
+        <div class="sidebar-brand-name">Octo Family</div>
+        <div class="sidebar-brand-tag" id="host"></div>
+      </div>
+    </header>
+    <main id="join" aria-live="polite"><p class="state">Loading</p></main>
+  </div>
+  <dialog class="fam-sheet" id="sheet" aria-labelledby="sheet-title"></dialog>
+  <div class="activity" role="region" aria-label="Messages">
+    <div id="toast" role="status" aria-live="polite"></div>
+  </div>
+  <noscript><p class="state">This page needs JavaScript.</p></noscript>
+  <script src="/family/qr.js" defer></script>
+  <script src="/family/common.js" defer></script>
+  <script src="/family/join.js" defer></script>
+</body>
+</html>

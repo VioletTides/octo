@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Options;
 using Octo.Models.Settings;
+using Octo.Services.Common;
 
 namespace Octo.Services.Lidarr;
 
@@ -18,7 +19,22 @@ public sealed record LidarrAlbumCandidate(
 
 public sealed record LidarrImportedTrack(
     int Id, string Title, int? TrackNumber, int? DurationSeconds, bool HasFile,
-    string? Path, long SizeBytes, string? Artist);
+    string? Path, long SizeBytes, string? Artist, int TrackFileId = 0, string? Quality = null);
+
+/// <summary>An album Lidarr already has, as it stood before Octo touched it.</summary>
+public sealed record LidarrAlbumState(int Id, bool Monitored);
+
+/// <summary>A search Lidarr accepted, and whether Octo added or monitored the album to get it.</summary>
+public sealed record LidarrSearchStarted(int AlbumId, bool Existed, bool WasMonitored);
+
+/// <summary>One release an indexer offered for an album, as Lidarr's interactive search lists it.
+/// Rejected says Lidarr would not take it on its own, and Rejections says why.</summary>
+public sealed record LidarrRelease(string Guid, int IndexerId, string Title, string? Indexer, string? Quality,
+    long? Size, int? Seeders, int? Leechers, string? Protocol, int? AgeDays, bool Rejected, IReadOnlyList<string> Rejections);
+
+/// <summary>A release someone picked in Find songs, grabbed instead of Lidarr's own search. Its
+/// title and size find it again when Lidarr has forgotten the search that listed it.</summary>
+public sealed record LidarrReleasePick(string Guid, int IndexerId, string? Title, long? Size = null);
 
 public sealed record LidarrAlbumImportState(
     IReadOnlyList<LidarrImportedTrack> Tracks, int TrackCount, int TrackFileCount)
@@ -93,13 +109,21 @@ public sealed class LidarrClient
             ?? throw new InvalidOperationException($"Lidarr could not unambiguously match '{artist} - {album}'.");
     }
 
+    /// <summary>The candidate for a MusicBrainz release group id, or null when Lidarr does not know it.</summary>
+    public async Task<LidarrAlbumCandidate?> ResolveAlbumByForeignIdAsync(string foreignAlbumId, CancellationToken ct = default)
+    {
+        var rows = await GetArrayAsync($"/api/v1/album/lookup?term={Uri.EscapeDataString("lidarr:" + foreignAlbumId)}", ct);
+        return rows.Select(ParseAlbum).FirstOrDefault(x =>
+            string.Equals(x.ForeignAlbumId, foreignAlbumId, StringComparison.OrdinalIgnoreCase));
+    }
+
     internal static LidarrAlbumCandidate? SelectBestAlbum(
         IReadOnlyList<LidarrAlbumCandidate> candidates, string artist, string album, int? year)
     {
-        var wantedArtist = Normalize(artist);
-        var wantedAlbum = Normalize(album);
+        var wantedArtist = SongIdentity.Key(artist);
+        var wantedAlbum = SongIdentity.Key(album);
         var exact = candidates
-            .Where(c => Normalize(c.Artist) == wantedArtist && Normalize(c.Title) == wantedAlbum)
+            .Where(c => SongIdentity.Key(c.Artist) == wantedArtist && SongIdentity.Key(c.Title) == wantedAlbum)
             .GroupBy(c => c.ForeignAlbumId, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
             .ToList();
@@ -117,22 +141,143 @@ public sealed class LidarrClient
         return null;
     }
 
-    public async Task<int> EnsureAlbumAndSearchAsync(LidarrAlbumCandidate candidate, CancellationToken ct = default)
+    public async Task<int> EnsureAlbumAndSearchAsync(LidarrAlbumCandidate candidate, CancellationToken ct = default) =>
+        (await StartAlbumSearchAsync(candidate, ct)).AlbumId;
+
+    /// <summary>The album as Lidarr has it now, or null when Lidarr does not have it yet.</summary>
+    public async Task<LidarrAlbumState?> FindAlbumAsync(string foreignAlbumId, CancellationToken ct = default)
+    {
+        var existing = await GetArrayAsync($"/api/v1/album?foreignAlbumId={Uri.EscapeDataString(foreignAlbumId)}", ct);
+        return existing.Count == 0 ? null
+            : new LidarrAlbumState(Int(existing[0], "id"), existing[0]["monitored"]?.GetValue<bool>() ?? false);
+    }
+
+    /// <summary>Monitor or unmonitor albums, leaving everything else about them alone.</summary>
+    public async Task SetAlbumsMonitoredAsync(IReadOnlyCollection<int> albumIds, bool monitored, CancellationToken ct = default)
+    {
+        if (albumIds.Count == 0) return;
+        using var request = CreateRequest(HttpMethod.Put, "/api/v1/album/monitor");
+        request.Content = JsonContent.Create(new JsonObject
+        {
+            ["albumIds"] = new JsonArray(albumIds.Select(id => (JsonNode)id).ToArray()),
+            ["monitored"] = monitored,
+        });
+        using var _ = await SendAsync(request, ct);
+    }
+
+    /// <summary>Delete one track file, from Lidarr and from disk (into Lidarr's recycle bin when it has one).</summary>
+    public async Task DeleteTrackFileAsync(int trackFileId, CancellationToken ct = default)
+    {
+        using var request = CreateRequest(HttpMethod.Delete, $"/api/v1/trackfile/{trackFileId}");
+        using var _ = await SendAsync(request, ct);
+    }
+
+    /// <summary>How long an interactive search may take: Lidarr asks every indexer before it answers.</summary>
+    internal static readonly TimeSpan ReleaseSearchTimeout = TimeSpan.FromSeconds(120);
+
+    /// <summary>
+    /// Every release the indexers offer for an album Lidarr has, as its interactive search lists
+    /// them, best first by Lidarr's own order. Nothing is grabbed.
+    /// </summary>
+    public async Task<IReadOnlyList<LidarrRelease>> ListReleasesAsync(int albumId, CancellationToken ct = default)
+    {
+        using var request = CreateRequest(HttpMethod.Get, $"/api/v1/release?albumId={albumId}");
+        using var response = await SendAsync(request, ct, ReleaseSearchTimeout);
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        var rows = (await JsonNode.ParseAsync(stream, cancellationToken: ct) as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
+        return rows.Select(ParseRelease).Where(r => r.Guid.Length > 0).ToList();
+    }
+
+    internal static LidarrRelease ParseRelease(JsonObject row)
+    {
+        var quality = (row["quality"] as JsonObject)?["quality"] as JsonObject;
+        var age = row["ageHours"] is JsonValue hours && hours.TryGetValue<double>(out var h) ? (int?)(int)Math.Round(h / 24)
+            : NullableNumber(row, "age");
+        return new LidarrRelease(
+            NullableStr(row, "guid") ?? "",
+            NullableNumber(row, "indexerId") ?? 0,
+            NullableStr(row, "title") ?? "",
+            NullableStr(row, "indexer"),
+            quality is null ? null : NullableStr(quality, "name"),
+            row["size"] is JsonValue size && size.TryGetValue<double>(out var bytes) ? (long)bytes : null,
+            NullableNumber(row, "seeders"),
+            NullableNumber(row, "leechers"),
+            NullableStr(row, "protocol"),
+            age,
+            row["rejected"] is JsonValue rejected && rejected.TryGetValue<bool>(out var no) && no,
+            (row["rejections"] as JsonArray)?.Select(r => r?.GetValue<string>() ?? "").Where(r => r.Length > 0).ToList() ?? []);
+    }
+
+    /// <summary>Asks Lidarr to download one release an interactive search listed.</summary>
+    public async Task GrabReleaseAsync(LidarrReleasePick release, CancellationToken ct = default) =>
+        await SendJsonAsync(HttpMethod.Post, "/api/v1/release", new JsonObject
+        {
+            ["guid"] = release.Guid,
+            ["indexerId"] = release.IndexerId,
+        }, ct);
+
+    internal const string PickGoneText = "The release you picked is no longer offered by the indexers. Search again and pick another.";
+
+    /// <summary>
+    /// Grabs a picked release. Lidarr keeps an interactive search's releases only for a while, and
+    /// a pick made before that ran out is refused by its guid; the album's releases are then listed
+    /// once more and the same release, by its indexer, title and size, is grabbed under its new guid.
+    /// </summary>
+    internal async Task GrabPickedAsync(int albumId, LidarrReleasePick pick, CancellationToken ct)
+    {
+        try
+        {
+            await GrabReleaseAsync(pick, ct);
+            return;
+        }
+        catch (HttpRequestException)
+        {
+            // Most likely forgotten; found again below, or refused in plain words.
+        }
+        var again = (await ListReleasesAsync(albumId, ct)).FirstOrDefault(release => SameRelease(release, pick))
+            ?? throw new InvalidOperationException(PickGoneText);
+        try
+        {
+            await GrabReleaseAsync(new LidarrReleasePick(again.Guid, again.IndexerId, again.Title, again.Size), ct);
+        }
+        catch (HttpRequestException)
+        {
+            throw new InvalidOperationException("Lidarr would not take the release you picked. Search again and pick another.");
+        }
+    }
+
+    /// <summary>The same release in a newer listing: the same indexer and title, and the same size when both say.</summary>
+    internal static bool SameRelease(LidarrRelease release, LidarrReleasePick pick) =>
+        release.IndexerId == pick.IndexerId
+        && !string.IsNullOrWhiteSpace(pick.Title)
+        && string.Equals(release.Title.Trim(), pick.Title.Trim(), StringComparison.OrdinalIgnoreCase)
+        && (release.Size is null || pick.Size is null || release.Size == pick.Size);
+
+    /// <summary>
+    /// Adds the album when Lidarr lacks it, monitors it, and starts an AlbumSearch, or grabs the
+    /// release someone picked. Says whether the album was there before and monitored, so a caller
+    /// that only borrowed it can put it back.
+    /// </summary>
+    public async Task<LidarrSearchStarted> StartAlbumSearchAsync(LidarrAlbumCandidate candidate, CancellationToken ct = default,
+        LidarrReleasePick? grab = null)
     {
         var settings = RequireSettings(requireProfiles: true);
         var existing = await GetArrayAsync(
             $"/api/v1/album?foreignAlbumId={Uri.EscapeDataString(candidate.ForeignAlbumId)}", ct);
 
         int albumId;
+        var wasMonitored = false;
         if (existing.Count > 0)
         {
             var resource = existing[0];
             albumId = Int(resource, "id");
-            if (!(resource["monitored"]?.GetValue<bool>() ?? false))
+            wasMonitored = resource["monitored"]?.GetValue<bool>() ?? false;
+            if (!wasMonitored)
             {
                 resource["monitored"] = true;
                 await SendJsonAsync(HttpMethod.Put, $"/api/v1/album/{albumId}", resource, ct);
             }
+            await EnsureArtistMonitoredAsync(resource["artist"] as JsonObject, ct);
         }
         else
         {
@@ -163,23 +308,38 @@ public sealed class LidarrClient
                 artist["monitored"] = true;
                 artist["monitorNewItems"] = "none";
                 artist["tags"] = new JsonArray();
+                // "none" would unmonitor the artist and, after its first refresh, this album too.
                 artist["addOptions"] = new JsonObject
                 {
-                    ["monitor"] = "none",
+                    ["monitor"] = "unknown",
+                    ["albumsToMonitor"] = new JsonArray(candidate.ForeignAlbumId),
                     ["searchForMissingAlbums"] = false,
                 };
             }
 
             var added = await SendJsonAsync(HttpMethod.Post, "/api/v1/album", resource, ct);
             albumId = Int(added, "id");
+            await EnsureArtistMonitoredAsync(existingArtist, ct);
         }
 
-        await SendJsonAsync(HttpMethod.Post, "/api/v1/command", new JsonObject
-        {
-            ["name"] = "AlbumSearch",
-            ["albumIds"] = new JsonArray(albumId),
-        }, ct);
-        return albumId;
+        if (grab is not null) await GrabPickedAsync(albumId, grab, ct);
+        else
+            await SendJsonAsync(HttpMethod.Post, "/api/v1/command", new JsonObject
+            {
+                ["name"] = "AlbumSearch",
+                ["albumIds"] = new JsonArray(albumId),
+            }, ct);
+        return new LidarrSearchStarted(albumId, existing.Count > 0, wasMonitored);
+    }
+
+    /// <summary>Lidarr neither upgrades nor re-searches albums of an unmonitored artist.</summary>
+    private async Task EnsureArtistMonitoredAsync(JsonObject? artist, CancellationToken ct)
+    {
+        if (artist is null || artist["monitored"]?.GetValue<bool>() != false) return;
+        var id = Int(artist, "id");
+        var full = await GetObjectAsync($"/api/v1/artist/{id}", ct);
+        full["monitored"] = true;
+        await SendJsonAsync(HttpMethod.Put, $"/api/v1/artist/{id}", full, ct);
     }
 
     public async Task<IReadOnlyList<LidarrImportedTrack>> GetAlbumTracksAsync(int albumId, CancellationToken ct = default)
@@ -202,7 +362,9 @@ public sealed class LidarrClient
                 row["hasFile"]?.GetValue<bool>() ?? false,
                 file is null ? null : NullableStr(file, "path"),
                 file is null ? 0 : NullableLong(file, "size") ?? 0,
-                artist is null ? null : NullableStr(artist, "artistName"));
+                artist is null ? null : NullableStr(artist, "artistName"),
+                file is null ? 0 : trackFileId,
+                file?["quality"]?["quality"]?["name"]?.GetValue<string>());
         }).ToList();
     }
 
@@ -244,10 +406,10 @@ public sealed class LidarrClient
         return request;
     }
 
-    private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct, TimeSpan? timeout = null)
     {
         var client = _httpFactory.CreateClient();
-        client.Timeout = TimeSpan.FromSeconds(20);
+        client.Timeout = timeout ?? TimeSpan.FromSeconds(20);
         var response = await client.SendAsync(request, ct);
         if (!response.IsSuccessStatusCode)
         {
@@ -314,9 +476,6 @@ public sealed class LidarrClient
             (JsonObject)row.DeepClone());
     }
 
-    internal static string Normalize(string value) =>
-        new(value.Normalize().ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
-
     private static int? ParseTrackNumber(string value)
     {
         var head = value.Split('-', '/', '.')[0];
@@ -329,4 +488,8 @@ public sealed class LidarrClient
     private static string? NullableStr(JsonObject o, string key) => o[key]?.GetValue<string>();
     private static int? NullableInt(JsonObject o, string key) => o[key]?.GetValue<int>();
     private static long? NullableLong(JsonObject o, string key) => o[key]?.GetValue<long>();
+
+    // A whole number however Lidarr wrote it.
+    private static int? NullableNumber(JsonObject o, string key) =>
+        o[key] is JsonValue value && value.TryGetValue<double>(out var number) ? (int)Math.Round(number) : null;
 }

@@ -41,7 +41,7 @@ public sealed record NotificationEvent
     public long? SizeBytes { get; init; }
 
     /// <summary>Track length in seconds. On the completed path this is the enriched
-    /// song's duration (EnrichAndTagAsync runs before the hook); on started it is
+    /// song's duration (EnrichAsync runs before the hook); on started it is
     /// the routing's expected duration.</summary>
     public int? DurationSeconds { get; init; }
 
@@ -55,4 +55,16 @@ public sealed record NotificationEvent
     public int? TrackCount { get; init; }
     public int? LosslessCount { get; init; }
     public int? FailedCount { get; init; }
+
+    /// <summary>Songs of the album already in the library, kept as they were.</summary>
+    public int? KeptCount { get; init; }
+
+    /// <summary>Owned songs that were lossy, queued for a higher quality copy instead.</summary>
+    public int? UpgradingCount { get; init; }
+
+    /// <summary>
+    /// Who asked for this, when Octo could tell. Empty for an acquisition Octo started
+    /// itself, and for every event when the setting is off.
+    /// </summary>
+    public IReadOnlyList<string>? RequestedBy { get; init; }
 }

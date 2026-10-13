@@ -1,0 +1,1173 @@
+//! "Tidy artists" against real files in a temp folder, with Navidrome stood in for. The order is
+//! the point: tags, a scan that started after them, then whole album folders, and nothing that
+//! could lose a file or a song's stars.
+
+use std::path::Path;
+use std::sync::atomic::AtomicUsize;
+use std::time::SystemTime;
+
+use async_trait::async_trait;
+use octo_core::models::domain::Song;
+use octo_core::models::download::DownloadHistoryEntry;
+use octo_core::models::subsonic::ScanStatus;
+use octo_core::settings::AppSettings;
+
+use super::*;
+use crate::services::library::explicit_backfill_store::{ExplicitBackfillRow, ExplicitBackfillSong};
+use crate::services::library::library_tag_edits::TagEditEntry;
+use crate::services::local::{LocalSongMapping, ParsedExternalId, ParsedSongId, ScanHold};
+use crate::services::metadata::GenreJournalEntry;
+use crate::services::subsonic::navidrome_version::ServerInfo;
+use crate::services::test_audio::audio_or_skip;
+
+/// Navidrome as the tidy sees it: a version, a scan that finishes as soon as it is started
+/// (unless told not to), Octo's mappings, and its own hold on scans.
+struct FakeNavidrome {
+    info: Mutex<Option<ServerInfo>>,
+    mappings: Mutex<Vec<LocalSongMapping>>,
+    /// The last scan's start and finish.
+    last_scan: Mutex<(DateTime<Utc>, DateTime<Utc>)>,
+    scans_finish: AtomicBool,
+    starts: AtomicUsize,
+    hold: ScanHold,
+    on_start: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+impl FakeNavidrome {
+    fn new() -> Self {
+        let long_ago = Utc::now() - chrono::TimeDelta::minutes(5);
+        Self {
+            info: Mutex::new(Some(ServerInfo::new(Some("navidrome"), Some("0.64.2 (abc)")))),
+            mappings: Mutex::new(Vec::new()),
+            last_scan: Mutex::new((long_ago, long_ago + chrono::TimeDelta::seconds(1))),
+            scans_finish: AtomicBool::new(true),
+            starts: AtomicUsize::new(0),
+            hold: ScanHold::new(),
+            on_start: Mutex::new(None),
+        }
+    }
+
+    fn starts(&self) -> usize {
+        self.starts.load(Ordering::SeqCst)
+    }
+
+    fn own(&self, path: &str) {
+        self.mappings.lock().push(LocalSongMapping {
+            external_provider: "deezer".into(),
+            external_id: path.to_string(),
+            local_path: path.to_string(),
+            ..LocalSongMapping::default()
+        });
+    }
+}
+
+#[async_trait]
+impl ILocalLibraryService for FakeNavidrome {
+    async fn get_local_path_for_external_song(&self, _: &str, _: &str) -> Option<String> {
+        None
+    }
+    async fn register_downloaded_song(&self, _: &Song, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn get_local_id_for_external_song(&self, _: &str, _: &str) -> Option<String> {
+        None
+    }
+    fn parse_song_id(&self, _: &str) -> ParsedSongId {
+        (false, None, None)
+    }
+    fn parse_external_id(&self, _: &str) -> ParsedExternalId {
+        (false, None, None, None)
+    }
+    async fn get_mappings(&self) -> Vec<LocalSongMapping> {
+        self.mappings.lock().clone()
+    }
+    async fn find_mapping_by_tags(
+        &self,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Option<LocalSongMapping> {
+        None
+    }
+    async fn forget_mapping(&self, _: &str) -> anyhow::Result<Vec<LocalSongMapping>> {
+        Ok(Vec::new())
+    }
+    async fn trigger_library_scan(&self, _: bool) -> bool {
+        if self.hold.defer() {
+            return true;
+        }
+        self.start_scan().await
+    }
+    async fn start_scan(&self) -> bool {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        if let Some(hook) = self.on_start.lock().as_ref() {
+            hook();
+        }
+        if self.scans_finish.load(Ordering::SeqCst) {
+            let now = Utc::now();
+            *self.last_scan.lock() = (now, now + chrono::TimeDelta::milliseconds(1));
+        }
+        true
+    }
+    fn scan_hold(&self) -> Option<ScanHold> {
+        Some(self.hold.clone())
+    }
+    async fn get_scan_status(&self) -> Option<ScanStatus> {
+        let (start, finish) = *self.last_scan.lock();
+        Some(ScanStatus {
+            scanning: false,
+            count: Some(1),
+            last_scan: Some(finish.to_rfc3339()),
+            elapsed_time: (finish - start).num_nanoseconds(),
+            folder_count: None,
+        })
+    }
+    async fn get_server_info(&self) -> Option<ServerInfo> {
+        self.info.lock().clone()
+    }
+    async fn update_local_path(&self, old_path: &str, new_path: &str) -> anyhow::Result<usize> {
+        let mut moved = 0;
+        for mapping in self.mappings.lock().iter_mut() {
+            if let Some(now) = PathHelper::moved_path(&mapping.local_path, old_path, new_path) {
+                mapping.local_path = now;
+                moved += 1;
+            }
+        }
+        Ok(moved)
+    }
+}
+
+struct Rig {
+    _dir: tempfile::TempDir,
+    root: String,
+    config: PathBuf,
+    worker: TidyWorker,
+    navidrome: Arc<FakeNavidrome>,
+    notices: Arc<NoticeQueue>,
+    genre: Arc<GenreBackfillJournal>,
+    tag_edits: Arc<TagEditJournal>,
+    history: Arc<DownloadHistoryService>,
+    covers: Arc<CoverUpgradeJournal>,
+    lyrics_undo: Arc<LyricsUndoJournal>,
+    explicit: Arc<ExplicitBackfillStore>,
+    songs: Arc<Mutex<HashMap<String, NavidromeSongEntry>>>,
+    flac: Vec<u8>,
+}
+
+fn quick() -> ScanWaitTiming {
+    ScanWaitTiming {
+        poll: Duration::from_millis(1),
+        timeout: Duration::from_secs(3),
+    }
+}
+
+impl Rig {
+    fn new(flac: Vec<u8>) -> Self {
+        Self::with(flac, None, |worker| worker)
+    }
+
+    fn with(
+        flac: Vec<u8>,
+        music_brainz: Option<Arc<MusicBrainzClient>>,
+        configure: impl FnOnce(TidyWorker) -> TidyWorker,
+    ) -> Self {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = dir.path().join("music");
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&root).expect("made");
+        let settings = Arc::new(SettingsStore::for_tests(AppSettings::default()));
+        settings.set_raw("Library:DownloadPath", Some(&root.to_string_lossy()));
+        let covers = Arc::new(CoverUpgradeJournal::new(Some(config.join("cover-journal.jsonl"))));
+        let lyrics_undo = Arc::new(LyricsUndoJournal::new(Some(config.join("lyrics-undo.jsonl"))));
+        let explicit = Arc::new(ExplicitBackfillStore::new(Some(config.join("explicit.json"))));
+        let navidrome = Arc::new(FakeNavidrome::new());
+        let notices = Arc::new(NoticeQueue::new());
+        let genre = Arc::new(GenreBackfillJournal::new(Some(config.join("genre.jsonl"))));
+        let tag_edits = Arc::new(TagEditJournal::new(Some(config.join("tag-edits.json"))));
+        let history = Arc::new(DownloadHistoryService::new(config.join("history.json")));
+        let songs: Arc<Mutex<HashMap<String, NavidromeSongEntry>>> = Arc::default();
+        let listed = songs.clone();
+        let list_songs: ListSongs = Arc::new(move || {
+            let songs = listed.lock().clone();
+            Box::pin(async move { songs })
+        });
+        let worker = TidyWorker::new(
+            Arc::new(TidyStore::new(
+                Some(config.join("tidy-run.json")),
+                Some(config.join("tidy-plan.json")),
+            )),
+            Arc::new(TidyJournal::new(Some(config.join("tidy-journal.jsonl")))),
+            settings.clone(),
+            TidyServices {
+                library: Some(navidrome.clone()),
+                music_brainz,
+                notices: Some(notices.clone()),
+                genre_journal: Some(genre.clone()),
+                tag_edits: Some(tag_edits.clone()),
+                actions: None,
+                history: Some(history.clone()),
+                list_songs: Some(list_songs),
+                cover_journal: Some(covers.clone()),
+                lyrics_undo: Some(lyrics_undo.clone()),
+                explicit: Some(explicit.clone()),
+                quarantine: Some(Arc::new(LibraryActionQuarantine::new(settings.clone()))),
+            },
+        )
+        .with_timing(quick());
+        let worker = configure(worker);
+        Rig {
+            _dir: dir,
+            root: root.to_string_lossy().into_owned(),
+            config,
+            worker,
+            navidrome,
+            notices,
+            genre,
+            tag_edits,
+            history,
+            covers,
+            lyrics_undo,
+            explicit,
+            songs,
+            flac,
+        }
+    }
+
+    fn at(&self, relative: &str) -> String {
+        format!("{}/{relative}", self.root)
+    }
+
+    /// A real, tagged FLAC, last written ten minutes ago, before Navidrome's last scan.
+    fn song(&self, relative: &str, artist: &str, artists: &[&str], title: &str) -> String {
+        let path = self.at(relative);
+        std::fs::create_dir_all(Path::new(&path).parent().expect("a folder")).expect("made");
+        std::fs::write(&path, &self.flac).expect("written");
+        let mut file = TagFile::open(&path).expect("opens");
+        file.set_performers(&[artist.to_string()]);
+        file.set_album_artists(&[artist.to_string()]);
+        file.set_title(Some(title));
+        if !artists.is_empty() {
+            let values: Vec<String> = artists.iter().map(|v| v.to_string()).collect();
+            extras::set_multi_value(&mut file, "ARTISTS", &values);
+        }
+        file.save().expect("saved");
+        age(&path);
+        path
+    }
+
+    fn collab(&self) -> String {
+        self.song(
+            "Bizarrap, Rauw Alejandro/Album/01 - Session.flac",
+            "Bizarrap, Rauw Alejandro",
+            &["Bizarrap", "Rauw Alejandro"],
+            "Session (feat. Guest)",
+        )
+    }
+
+    async fn preview(&self, scope: TidyScope) {
+        self.run(TidyRequest {
+            mode: TidyMode::Preview,
+            scope,
+            ..TidyRequest::default()
+        })
+        .await;
+    }
+
+    async fn apply(&self, scope: TidyScope, ticked: &[String]) {
+        self.run(TidyRequest {
+            mode: TidyMode::Apply,
+            scope,
+            ticked: ticked.to_vec(),
+            ..TidyRequest::default()
+        })
+        .await;
+    }
+
+    async fn run(&self, request: TidyRequest) {
+        self.worker.run_once(request, &CancellationToken::new()).await;
+    }
+
+    fn run_state(&self) -> TidyRun {
+        self.worker.current()
+    }
+}
+
+fn age(path: &str) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(SystemTime::now() - Duration::from_secs(600)))
+        .expect("aged");
+}
+
+fn tags(path: &str) -> TidyTags {
+    read_tags(&TagFile::open(path).expect("opens"))
+}
+
+fn exists(path: &str) -> bool {
+    Path::new(path).exists()
+}
+
+const WHOLE: TidyScope = TidyScope::WholeLibrary;
+
+// ---- preview --------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn preview_writes_nothing() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.collab();
+    let bytes = std::fs::read(&source).expect("read");
+
+    rig.preview(WHOLE).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Completed, "{:?}", run.reason);
+    assert_eq!((run.planned_retags, run.planned_moves), (1, 1));
+    let plan = rig.worker.store().plan().expect("the plan is kept");
+    assert!(plan.plan.rows.iter().any(|row| row.kind == TidyKind::Split));
+    assert_eq!(std::fs::read(&source).expect("read"), bytes);
+    assert!(!exists(&rig.at("Bizarrap")));
+    assert!(!rig.worker.journal().exists());
+    assert_eq!(rig.navidrome.starts(), 0);
+}
+
+// ---- apply ----------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn apply_writes_tags_waits_for_a_scan_then_moves() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.collab();
+    let target = rig.at("Bizarrap/Album/01 - Session.flac");
+    let seen: Arc<Mutex<Vec<(bool, bool)>>> = Arc::default();
+    {
+        let (seen, source) = (seen.clone(), source.clone());
+        *rig.navidrome.on_start.lock() = Some(Box::new(move || {
+            let tagged = exists(&source) && tags(&source).artists.contains(&"Guest".to_string());
+            seen.lock().push((exists(&source), tagged));
+        }));
+    }
+
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Completed, "{:?}", run.reason);
+    // The first scan began with the file re-tagged and still where it was.
+    assert_eq!(seen.lock().first(), Some(&(true, true)));
+    assert!(exists(&target));
+    assert!(!exists(&rig.at("Bizarrap, Rauw Alejandro")));
+    let after = tags(&target);
+    assert_eq!(after.artists, ["Bizarrap", "Rauw Alejandro", "Guest"]);
+    assert_eq!(after.artist, ["Bizarrap, Rauw Alejandro"]);
+    assert_eq!(
+        TagFile::open(&target).expect("opens").title().as_deref(),
+        Some("Session (feat. Guest)")
+    );
+    // One scan between the phases, one after the moves.
+    assert_eq!(rig.navidrome.starts(), 2);
+    assert_eq!((run.retagged, run.moved), (1, 1));
+}
+
+#[tokio::test]
+async fn apply_refused_before_navidrome_055() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    *rig.navidrome.info.lock() = Some(ServerInfo::new(Some("navidrome"), Some("0.54.5 (abc)")));
+    let source = rig.collab();
+    let bytes = std::fs::read(&source).expect("read");
+
+    rig.preview(WHOLE).await;
+    assert_eq!(rig.run_state().status, TidyStatus::Completed);
+    rig.apply(WHOLE, &[]).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Failed);
+    assert!(
+        run.reason.as_deref().is_some_and(|why| why.contains("0.55")),
+        "{:?}",
+        run.reason
+    );
+    assert_eq!(std::fs::read(&source).expect("read"), bytes);
+    assert!(!rig.worker.journal().exists());
+}
+
+#[tokio::test]
+async fn apply_without_a_preview_is_refused() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    rig.collab();
+
+    rig.apply(WHOLE, &[]).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Failed);
+    assert!(
+        run.reason
+            .as_deref()
+            .is_some_and(|why| why.contains("Preview first"))
+    );
+}
+
+#[tokio::test]
+async fn apply_library_changed_since_the_preview_touches_nothing() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.collab();
+    rig.preview(WHOLE).await;
+    let other = rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+
+    rig.apply(WHOLE, &[]).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Failed);
+    assert!(
+        run.reason
+            .as_deref()
+            .is_some_and(|why| why.contains("changed since the preview"))
+    );
+    assert!(exists(&source) && exists(&other));
+    assert!(!rig.worker.journal().exists());
+}
+
+#[tokio::test]
+async fn apply_a_taken_album_folder_keeps_both() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    rig.preview(WHOLE).await;
+    // Something lands at the target after the preview: no audio, so the plan is the same.
+    std::fs::create_dir_all(rig.at("Beyonc\u{e9}/A")).expect("made");
+    std::fs::write(rig.at("Beyonc\u{e9}/A/notes.txt"), "mine").expect("written");
+
+    rig.apply(WHOLE, &[]).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Completed, "{:?}", run.reason);
+    assert!(exists(&source));
+    assert!(exists(&rig.at("Beyonc\u{e9}/A/notes.txt")));
+    assert!(
+        run.held_rows
+            .iter()
+            .any(|row| row.evidence.contains("already there"))
+    );
+}
+
+#[tokio::test]
+async fn apply_lyrics_the_cover_and_the_cue_travel_with_the_folder() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    for (name, body) in [
+        ("01 - S.lrc", "[00:01.00]hello"),
+        ("cover.jpg", "jpg"),
+        ("A.cue", "FILE"),
+    ] {
+        std::fs::write(rig.at(&format!("Beyonce/A/{name}")), body).expect("written");
+    }
+
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+
+    assert_eq!(
+        rig.run_state().status,
+        TidyStatus::Completed,
+        "{:?}",
+        rig.run_state().reason
+    );
+    for name in ["01 - S.flac", "01 - S.lrc", "cover.jpg", "A.cue"] {
+        assert!(exists(&rig.at(&format!("Beyonc\u{e9}/A/{name}"))), "{name}");
+    }
+    assert!(!exists(&source));
+    // Emptied, so gone, and never above the music folder.
+    assert!(!exists(&rig.at("Beyonce")));
+    assert!(exists(&rig.root));
+}
+
+#[tokio::test]
+async fn apply_octos_records_follow_the_file() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    let target = rig.at("Beyonc\u{e9}/A/01 - S.flac");
+    rig.navidrome.own(&source);
+    rig.notices.add_review(
+        "alice",
+        &source,
+        &Song {
+            artist: "Beyonc\u{e9}".into(),
+            title: "S".into(),
+            ..Song::default()
+        },
+        &octo_core::fingerprint::VerificationResult::default(),
+    );
+    rig.genre.append(&GenreJournalEntry::new(
+        &source,
+        vec!["Pop".into()],
+        vec!["R&B".into()],
+        Utc::now(),
+        "g1",
+    ));
+    rig.tag_edits.record(
+        TagEditEntry {
+            path: source.clone(),
+            ..TagEditEntry::default()
+        },
+        true,
+    );
+    rig.history.record(DownloadHistoryEntry {
+        path: source.clone(),
+        ..DownloadHistoryEntry::default()
+    });
+
+    rig.preview(TidyScope::OctoDownloads).await;
+    rig.apply(TidyScope::OctoDownloads, &[]).await;
+
+    assert_eq!(
+        rig.run_state().status,
+        TidyStatus::Completed,
+        "{:?}",
+        rig.run_state().reason
+    );
+    assert!(exists(&target));
+    assert_eq!(rig.navidrome.mappings.lock()[0].local_path, target);
+    assert_eq!(rig.notices.recent(10)[0].local_path, target);
+    assert_eq!(rig.genre.read_all()[0].path, target);
+    assert_eq!(rig.tag_edits.last("").expect("kept").path, target);
+    assert_eq!(
+        TagEditJournal::new(Some(rig.config.join("tag-edits.json")))
+            .last("")
+            .expect("on disk")
+            .path,
+        target
+    );
+    assert_eq!(rig.history.get_recent(10)[0].path, target);
+}
+
+#[tokio::test]
+async fn apply_the_cover_lyrics_explicit_and_trash_records_follow_the_file() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    let target = rig.at("Beyonc\u{e9}/A/01 - S.flac");
+    let gone = rig.at("Beyonce/A/02 - Gone.flac");
+    let moved_gone = rig.at("Beyonc\u{e9}/A/02 - Gone.flac");
+    let lyrics = rig.at("Beyonce/A/01 - S.lrc");
+
+    assert!(
+        rig.covers
+            .record(&source, CoverUpgradeJournal::EMBEDDED, Some(b"old"), "c1")
+    );
+    rig.lyrics_undo
+        .record(&lyrics, LyricsUndoJournal::BESIDE, None, "l1")
+        .expect("recorded");
+    rig.explicit.update(|run| {
+        run.rows.push(ExplicitBackfillRow {
+            path: source.clone(),
+            ..ExplicitBackfillRow::default()
+        });
+        run.queue.push(ExplicitBackfillSong {
+            path: source.clone(),
+            ..ExplicitBackfillSong::default()
+        });
+    });
+    // A song of the album removed earlier waits in the trash with its note.
+    let trashed = rig.at(".octo-trash/2026-10-01/Beyonce/A/02 - Gone.flac");
+    std::fs::create_dir_all(Path::new(&trashed).parent().expect("a folder")).expect("made");
+    std::fs::write(&trashed, &rig.flac).expect("written");
+    std::fs::write(
+        format!("{trashed}{}", LibraryActionQuarantine::MANIFEST_SUFFIX),
+        serde_json::json!({
+            "OriginalPath": gone,
+            "NavidromeId": "nd-2",
+            "Action": "Delete",
+            "Username": "alice",
+            "AtUtc": "2026-10-01T00:00:00Z",
+        })
+        .to_string(),
+    )
+    .expect("written");
+
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+
+    assert_eq!(
+        rig.run_state().status,
+        TidyStatus::Completed,
+        "{:?}",
+        rig.run_state().reason
+    );
+    assert!(exists(&target));
+    assert_eq!(rig.covers.read_all()[0].path, target);
+    assert_eq!(
+        rig.lyrics_undo.read_all().expect("read")[0].path,
+        rig.at("Beyonc\u{e9}/A/01 - S.lrc")
+    );
+    let run = ExplicitBackfillStore::new(Some(rig.config.join("explicit.json"))).current();
+    assert_eq!(run.rows[0].path, target);
+    assert_eq!(run.queue[0].path, target);
+    let quarantine = LibraryActionQuarantine::new(Arc::new(SettingsStore::for_tests(AppSettings::default())));
+    assert_eq!(
+        quarantine.read_manifest(&trashed).expect("a note").original_path,
+        moved_gone
+    );
+}
+
+#[test]
+fn a_hidden_file_beside_the_songs_is_not_one_of_the_albums_songs() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let album = dir.path().join("A");
+    std::fs::create_dir_all(album.join(".hidden")).expect("made");
+    std::fs::write(album.join("01 - S.flac"), b"x").expect("written");
+    std::fs::write(album.join(".octo-keep-0a1b.flac"), b"x").expect("written");
+    std::fs::write(album.join(".hidden/02 - T.flac"), b"x").expect("written");
+
+    let contents = walk_all(&album).expect("walked");
+    assert_eq!(
+        contents.audio,
+        [album.join("01 - S.flac").to_string_lossy().into_owned()]
+    );
+}
+
+#[tokio::test]
+async fn octo_downloads_scope_leaves_other_files_alone() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let mine = rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    let theirs = rig.song("Beyonce/A/02 - T.flac", "Beyonc\u{e9}", &[], "T");
+    let own_album = rig.song("Beyonce/B/01 - U.flac", "Beyonc\u{e9}", &[], "U");
+    rig.navidrome.own(&mine);
+    rig.navidrome.own(&own_album);
+
+    rig.preview(TidyScope::OctoDownloads).await;
+    rig.apply(TidyScope::OctoDownloads, &[]).await;
+
+    assert_eq!(
+        rig.run_state().status,
+        TidyStatus::Completed,
+        "{:?}",
+        rig.run_state().reason
+    );
+    // A folder only moves whole: the album holding someone else's song stays.
+    assert!(exists(&mine) && exists(&theirs));
+    assert!(exists(&rig.at("Beyonc\u{e9}/B/01 - U.flac")));
+}
+
+#[tokio::test]
+async fn apply_a_file_changed_after_the_last_scan_stays_where_it_is() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    rig.preview(WHOLE).await;
+    std::fs::File::options()
+        .write(true)
+        .open(&source)
+        .and_then(|file| file.set_modified(SystemTime::now()))
+        .expect("touched");
+
+    rig.apply(WHOLE, &[]).await;
+
+    assert!(exists(&source));
+    assert!(
+        rig.run_state()
+            .held_rows
+            .iter()
+            .any(|row| row.evidence.contains("last scan"))
+    );
+}
+
+#[tokio::test]
+async fn apply_a_scan_that_never_finishes_moves_nothing() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    rig.navidrome.scans_finish.store(false, Ordering::SeqCst);
+    let source = rig.collab();
+
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Failed);
+    assert!(
+        run.reason
+            .as_deref()
+            .is_some_and(|why| why.contains("did not finish a scan")),
+        "{:?}",
+        run.reason
+    );
+    assert!(exists(&source));
+    assert!(tags(&source).artists.contains(&"Guest".to_string()));
+}
+
+#[tokio::test]
+async fn journal_write_failure_stops_the_run() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.collab();
+    let bytes = std::fs::read(&source).expect("read");
+    rig.preview(WHOLE).await;
+    rig.worker.journal().refuse_writes();
+
+    rig.apply(WHOLE, &[]).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Failed);
+    assert!(
+        run.reason.as_deref().is_some_and(|why| why.contains("journal")),
+        "{:?}",
+        run.reason
+    );
+    assert_eq!(std::fs::read(&source).expect("read"), bytes);
+    assert_eq!(run.retagged, 0);
+}
+
+#[tokio::test]
+async fn try_enqueue_a_second_run_waits_its_turn() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    assert!(rig.worker.try_enqueue(TidyRequest::default()));
+    assert!(!rig.worker.try_enqueue(TidyRequest::default()));
+}
+
+#[tokio::test]
+async fn star_loss_rows_need_a_tick_to_apply() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    rig.song("Beyonc\u{e9}/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    rig.song("Beyonc\u{e9}/A/02 - T.flac", "Beyonc\u{e9}", &[], "T");
+    let loser = rig.song("Beyonce/B/01 - U.flac", "Beyonce", &[], "U");
+
+    rig.preview(WHOLE).await;
+    let plan = rig.worker.store().plan().expect("kept").plan;
+    let rename = plan
+        .rows
+        .iter()
+        .find(|row| row.kind == TidyKind::Rename)
+        .expect("a rename row")
+        .clone();
+    assert!(rename.opt_in && !rename.ticked);
+    rig.apply(WHOLE, &[]).await;
+    assert_eq!(
+        rig.run_state().status,
+        TidyStatus::Completed,
+        "{:?}",
+        rig.run_state().reason
+    );
+    assert!(exists(&loser));
+    assert_eq!(tags(&loser).artist, ["Beyonce"]);
+
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[rename.id]).await;
+    let moved = rig.at("Beyonc\u{e9}/B/01 - U.flac");
+    assert_eq!(
+        rig.run_state().status,
+        TidyStatus::Completed,
+        "{:?}",
+        rig.run_state().reason
+    );
+    assert!(exists(&moved));
+    assert_eq!(tags(&moved).artist, ["Beyonc\u{e9}"]);
+}
+
+#[tokio::test]
+async fn files_tagged_from_musicbrainz_are_untouched() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let tagged = rig.song("Drake/A/01 - Work.flac", "Drake", &[], "Work (feat. Rihanna)");
+    {
+        let mut file = TagFile::open(&tagged).expect("opens");
+        extras::set_multi(
+            &mut file,
+            TagFields::ARTIST_ID,
+            &["9fff2f8a-21e6-47de-a2b8-7f449929d43f".to_string()],
+        );
+        file.save().expect("saved");
+        age(&tagged);
+    }
+    let bytes = std::fs::read(&tagged).expect("read");
+
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+
+    assert_eq!(rig.run_state().planned_retags, 0);
+    assert_eq!(std::fs::read(&tagged).expect("read"), bytes);
+}
+
+#[tokio::test]
+async fn playlists_follow_the_moved_songs_and_are_journaled() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    let playlist = rig.at("Mixes/road.m3u8");
+    std::fs::create_dir_all(rig.at("Mixes")).expect("made");
+    let text = format!(
+        "#EXTM3U\r\n../Beyonce/A/01 - S.flac\r\n{}/Beyonce/A/01 - S.flac\r\n",
+        rig.root
+    );
+    std::fs::write(&playlist, &text).expect("written");
+
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+
+    let now = std::fs::read_to_string(&playlist).expect("read");
+    assert_eq!(
+        now,
+        format!(
+            "#EXTM3U\r\n../Beyonc\u{e9}/A/01 - S.flac\r\n{}/Beyonc\u{e9}/A/01 - S.flac\r\n",
+            rig.root
+        )
+    );
+    assert!(rig.worker.journal().read_all().iter().any(|entry| matches!(
+        entry,
+        TidyJournalEntry::Playlist { before, .. } if *before == text
+    )));
+}
+
+/// A playlist is written whole beside itself and moved into place, so a stop part way never
+/// leaves half of it: the old file is never written into.
+#[tokio::test]
+async fn a_playlist_is_replaced_whole_never_written_into() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    let playlist = rig.at("Mixes/road.m3u");
+    std::fs::create_dir_all(rig.at("Mixes")).expect("made");
+    let text = "#EXTM3U\n../Beyonce/A/01 - S.flac\n";
+    std::fs::write(&playlist, text).expect("written");
+    // A second name for the same file: an in-place write would change what it reads too.
+    let other_name = rig.config.join("road-link.m3u");
+    std::fs::create_dir_all(&rig.config).expect("made");
+    std::fs::hard_link(&playlist, &other_name).expect("linked");
+
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+
+    assert_eq!(
+        std::fs::read_to_string(&playlist).expect("read"),
+        "#EXTM3U\n../Beyonc\u{e9}/A/01 - S.flac\n"
+    );
+    assert_eq!(std::fs::read_to_string(&other_name).expect("read"), text);
+}
+
+#[tokio::test]
+async fn a_moved_song_navidrome_lost_track_of_is_listed() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    let entry = |path: &str, id: &str, missing: bool| NavidromeSongEntry {
+        full_path: path.to_string(),
+        album_id: None,
+        artist: None,
+        title: None,
+        album: None,
+        lyrics: None,
+        id: Some(id.to_string()),
+        duration: None,
+        explicit_status: None,
+        missing,
+    };
+    rig.songs
+        .lock()
+        .insert(source.clone(), entry(&source, "nd-1", false));
+    {
+        let (songs, source) = (rig.songs.clone(), source.clone());
+        *rig.navidrome.on_start.lock() = Some(Box::new(move || {
+            // Navidrome sees the old path gone and the new one as a different song.
+            let mut songs = songs.lock();
+            if songs.len() == 1 && !Path::new(&source).exists() {
+                songs.insert(source.clone(), entry(&source, "nd-1", true));
+            }
+        }));
+    }
+
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Completed, "{:?}", run.reason);
+    assert!(
+        run.held_rows
+            .iter()
+            .any(|row| row.evidence.contains("did not match this moved song"))
+    );
+}
+
+#[tokio::test]
+async fn the_one_writer_gate_refuses_an_apply_while_another_job_writes() {
+    let gate = LibraryWriteGate::new();
+    let shared = gate.clone();
+    let rig = Rig::with(audio_or_skip!("flac"), None, move |worker| {
+        worker.with_write_gate(shared)
+    });
+    let source = rig.collab();
+    rig.preview(WHOLE).await;
+    let genre = gate.begin_job("The genre re-tag").await.expect("free");
+
+    rig.apply(WHOLE, &[]).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Failed);
+    assert!(
+        run.reason
+            .as_deref()
+            .is_some_and(|why| why.contains("The genre re-tag is changing"))
+    );
+    assert!(exists(&source));
+    drop(genre);
+}
+
+/// While the tidy waits for Navidrome's scan between the tags and the moves, a download can be
+/// placed; no other job can start meanwhile.
+#[tokio::test]
+async fn a_download_is_placed_while_the_tidy_waits_for_a_scan() {
+    let gate = LibraryWriteGate::new();
+    let shared = gate.clone();
+    let rig = Rig::with(audio_or_skip!("flac"), None, move |worker| {
+        worker.with_write_gate(shared)
+    });
+    rig.navidrome.scans_finish.store(false, Ordering::SeqCst);
+    rig.collab();
+    rig.preview(WHOLE).await;
+
+    let placed = async {
+        while rig.run_state().phase != "Waiting for Navidrome to scan" {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let share = tokio::time::timeout(Duration::from_secs(1), gate.write()).await;
+        let other_job = gate.begin_job("The genre re-tag").await.err();
+        (share.is_ok(), gate.job(), other_job)
+    };
+    let ((placed, holder, other_job), ()) = tokio::join!(placed, rig.apply(WHOLE, &[]));
+
+    assert!(placed, "a download waited for the whole scan");
+    assert_eq!(holder.as_deref(), Some(TidyWorker::JOB_NAME));
+    assert_eq!(other_job.as_deref(), Some(TidyWorker::JOB_NAME));
+}
+
+#[tokio::test]
+async fn resume_carries_on_a_stopped_apply() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    rig.navidrome.scans_finish.store(false, Ordering::SeqCst);
+    let source = rig.collab();
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+    assert_eq!(rig.run_state().status, TidyStatus::Failed);
+    assert!(exists(&source));
+
+    rig.navidrome.scans_finish.store(true, Ordering::SeqCst);
+    rig.run(TidyRequest {
+        mode: TidyMode::Apply,
+        scope: WHOLE,
+        resume: true,
+        ..TidyRequest::default()
+    })
+    .await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Completed, "{:?}", run.reason);
+    assert!(exists(&rig.at("Bizarrap/Album/01 - Session.flac")));
+    assert_eq!(run.moved, 1);
+}
+
+// ---- MusicBrainz ----------------------------------------------------------------------------
+
+/// A folder whose songs carry no credit splits only when its parts are library artists and
+/// MusicBrainz does not know the whole. Lookups past a preview's budget wait for the next
+/// preview, and an apply asks nothing new: it works from the answers the preview kept.
+#[tokio::test]
+async fn musicbrainz_lookups_are_budgeted_and_apply_asks_nothing_new() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let flac = audio_or_skip!("flac");
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"artists":[]}"#))
+        .mount(&server)
+        .await;
+    let base = url::Url::parse(&format!("{}/ws/2/", server.uri())).expect("parses");
+    let client = Arc::new(MusicBrainzClient::with_base_url(base));
+    let rig = Rig::with(flac, Some(client), |worker| worker);
+    rig.worker.set_max_lookups(0);
+    rig.song("Foo/A/01 - X.flac", "Foo", &[], "X");
+    rig.song("Bar/A/01 - Y.flac", "Bar", &[], "Y");
+    let source = rig.song("Foo, Bar/B/01 - S.flac", "Foo, Bar", &[], "S");
+
+    rig.preview(WHOLE).await;
+    assert_eq!(rig.run_state().planned_moves, 0);
+    assert_eq!(rig.run_state().lookups_not_asked, 1);
+    assert!(server.received_requests().await.unwrap_or_default().is_empty());
+
+    rig.worker.set_max_lookups(TidyWorker::MAX_LOOKUPS);
+    rig.preview(WHOLE).await;
+    assert_eq!(rig.run_state().planned_moves, 1);
+    let asked = server.received_requests().await.unwrap_or_default().len();
+    assert_eq!(asked, 1);
+
+    rig.apply(WHOLE, &[]).await;
+    assert_eq!(
+        rig.run_state().status,
+        TidyStatus::Completed,
+        "{:?}",
+        rig.run_state().reason
+    );
+    assert_eq!(server.received_requests().await.unwrap_or_default().len(), asked);
+    assert!(!exists(&source));
+    assert_eq!(tags(&rig.at("Foo/B/01 - S.flac")).artists, ["Foo", "Bar"]);
+}
+
+// ---- pure helpers ---------------------------------------------------------------------------
+
+#[test]
+fn a_playlist_line_outside_the_moved_folders_is_left_as_it_is() {
+    let moved = vec![("/m/Beyonce/A".to_string(), "/m/Beyonc\u{e9}/A".to_string())];
+    assert_eq!(
+        rewrite_playlist("/m/list.m3u", "#EXTM3U\nOther/x.flac\n", &moved),
+        None
+    );
+    assert_eq!(
+        rewrite_playlist("/m/list.m3u", "Beyonce/A/x.flac\n", &moved).as_deref(),
+        Some("Beyonc\u{e9}/A/x.flac\n")
+    );
+}
+
+#[test]
+fn a_case_sensitive_folder_is_told_apart_without_writing() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    std::fs::create_dir_all(dir.path().join("Artist")).expect("made");
+    let before: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("listed")
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    let insensitive = case_insensitive(&dir.path().to_string_lossy());
+    let after: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("listed")
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(before, after);
+    assert_eq!(insensitive, dir.path().join("ARTIST").exists());
+}
+
+// ---- undo -----------------------------------------------------------------------------------
+
+impl Rig {
+    async fn undo(&self, all_runs: bool) {
+        self.run(TidyRequest {
+            mode: TidyMode::Undo,
+            all_runs,
+            ..TidyRequest::default()
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn undo_puts_the_folder_back_then_its_tags() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.collab();
+    let before = tags(&source);
+    rig.navidrome.own(&source);
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+    let target = rig.at("Bizarrap/Album/01 - Session.flac");
+    assert!(exists(&target));
+    let starts = rig.navidrome.starts();
+    let seen: Arc<Mutex<Vec<(bool, bool)>>> = Arc::default();
+    {
+        let (seen, source) = (seen.clone(), source.clone());
+        *rig.navidrome.on_start.lock() = Some(Box::new(move || {
+            let still_new = exists(&source) && tags(&source).artists.contains(&"Guest".to_string());
+            seen.lock().push((exists(&source), still_new));
+        }));
+    }
+
+    rig.undo(false).await;
+
+    let run = rig.run_state();
+    assert_eq!(run.status, TidyStatus::Completed, "{:?}", run.reason);
+    assert!(exists(&source));
+    assert!(!exists(&target));
+    assert_eq!(tags(&source), before);
+    // The scan that saw the folder back came before the tags changed.
+    assert_eq!(seen.lock().first(), Some(&(true, true)));
+    assert_eq!(rig.navidrome.mappings.lock()[0].local_path, source);
+    assert!(!rig.worker.journal().exists());
+    assert!(rig.navidrome.starts() >= starts + 2);
+}
+
+#[tokio::test]
+async fn undo_never_moves_onto_a_taken_path_and_keeps_the_entry() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let source = rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+    let target = rig.at("Beyonc\u{e9}/A/01 - S.flac");
+    assert!(exists(&target));
+    // Something new lands at the old path.
+    std::fs::create_dir_all(Path::new(&source).parent().expect("a folder")).expect("made");
+    std::fs::write(&source, b"a newcomer").expect("written");
+
+    rig.undo(false).await;
+
+    assert!(exists(&target));
+    assert_eq!(std::fs::read(&source).expect("read"), b"a newcomer");
+    assert!(rig.worker.journal().read_all().iter().any(|entry| matches!(
+        entry,
+        TidyJournalEntry::Move { to, .. } if *to == rig.at("Beyonc\u{e9}/A")
+    )));
+    assert!(
+        rig.run_state()
+            .held_rows
+            .iter()
+            .any(|row| row.evidence.contains("Something else is at its old path"))
+    );
+}
+
+#[tokio::test]
+async fn undo_covers_the_last_run_by_default() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let first = rig.song("Beyonce/A/01 - S.flac", "Beyonc\u{e9}", &[], "S");
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+    let second = rig.song("Adele/B/01 - T.flac", "Adele", &[], "T (feat. Guest)");
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+    assert_eq!(tags(&second).artists, ["Adele", "Guest"]);
+
+    rig.undo(false).await;
+    assert!(tags(&second).artists.is_empty());
+    assert!(
+        exists(&rig.at("Beyonc\u{e9}/A/01 - S.flac")),
+        "the first run stays"
+    );
+    assert!(rig.worker.journal().exists());
+
+    rig.undo(false).await;
+    assert!(exists(&first));
+    assert!(!rig.worker.journal().exists());
+}
+
+#[tokio::test]
+async fn undo_leaves_tags_someone_edited_since() {
+    let rig = Rig::new(audio_or_skip!("flac"));
+    let song = rig.song("Adele/B/01 - T.flac", "Adele", &[], "T (feat. Guest)");
+    rig.preview(WHOLE).await;
+    rig.apply(WHOLE, &[]).await;
+    let mut file = TagFile::open(&song).expect("opens");
+    extras::set_multi_value(
+        &mut file,
+        "ARTISTS",
+        &["Adele".to_string(), "Someone".to_string()],
+    );
+    file.save().expect("saved");
+
+    rig.undo(false).await;
+
+    assert_eq!(tags(&song).artists, ["Adele", "Someone"]);
+    assert!(rig.worker.journal().exists());
+}
+
+#[test]
+fn remaining_a_restored_tag_entry_supersedes_newer_ones() {
+    let tags_of = |run: &str| TidyJournalEntry::Tags {
+        path: "/m/a.flac".into(),
+        before: TidyTags::default(),
+        after: TidyTags::default(),
+        run: run.into(),
+        at: Utc::now(),
+    };
+    let movement = TidyJournalEntry::Move {
+        from: "/m/B".into(),
+        to: "/m/C".into(),
+        run: "r2".into(),
+        at: Utc::now(),
+    };
+    let oldest_first = vec![tags_of("r1"), movement.clone(), tags_of("r2")];
+
+    let left = remaining(&oldest_first, &[0].into());
+
+    assert_eq!(left, [movement]);
+}

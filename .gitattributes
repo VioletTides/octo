@@ -1,0 +1,5 @@
+# The parity scripts run in bash on Linux, from any checkout.
+parity/*.sh text eol=lf
+parity/**/*.sh text eol=lf
+# Upload fixtures go out byte for byte, whatever the checkout.
+parity/fixtures/imports/** -text

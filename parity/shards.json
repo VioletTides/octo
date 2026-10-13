@@ -1,0 +1,40 @@
+[
+ {"name": "radio",
+  "why": "15-radio waits for Sounds alike's first look, about 125 s after Octo starts; 14 runs first, so it waits less. 15 reads nothing an earlier file leaves.",
+  "files": ["14-settings-media", "15-radio"]},
+ {"name": "lists",
+  "why": "16-lists waits for the second Made for you attempt, 5 minutes after the first, which 05-playlists makes; nothing else here would shorten that wait.",
+  "files": ["16-lists"],
+  "setup": ["05-playlists"],
+  "reads": {
+   "16-lists": {"05-playlists": "05's getPlaylists makes the first Made for you attempt for each user; the next one, which 16 waits for, comes 5 minutes after it"}}},
+ {"name": "imports",
+  "why": "12, 13 and 21 read nothing an earlier file leaves.",
+  "files": ["12-imports", "13-downloads", "21-static"]},
+ {"name": "dashboard",
+  "why": "18 needs the settings file 14 leaves; 17 reads nothing an earlier file leaves.",
+  "files": ["17-covers-explicit", "18-dashboard"],
+  "setup": ["14-settings-media"],
+  "reads": {
+   "18-dashboard": {"14-settings-media": "14's saves write the whole settings file, so 18's saves answer with every section under persisted"}}},
+ {"name": "library",
+  "why": "The quick files, then 19 and 20 (20 reads 19's history) and 90, which reads 05, 14 and 20 and takes 09's browse token. 99 ends with the restart, so it is last.",
+  "files": ["00-setup", "01-system", "02-browsing", "03-search", "04-media", "05-playlists", "06-lyrics", "07-octo-extensions", "08-catchall-native", "09-admin", "10-static-cors", "11-signin", "19-health", "20-library-edits", "90-mutations", "99-signed-out-writes"],
+  "setup": ["14-settings-media"],
+  "reads": {
+   "08-catchall-native": {"02-browsing": "Navidrome fills in the artists' externalInfoUpdatedAt after 02's artist info calls"},
+   "10-static-cors": {"05-playlists": "05 leaves an internet radio station that getInternetRadioStations lists"},
+   "20-library-edits": {"19-health": "19's fixes are in the library actions history and the tag edits journal 20 reads"},
+   "90-mutations": {
+    "05-playlists": "05's getPlaylists makes the admin's Made for you lists while nobody has played anything (Deep Cuts from the whole library); they are kept for the day, and 90's getPlaylists lists them",
+    "14-settings-media": "14's saves write the whole settings file, so 90's settings patch answers with every section under persisted",
+    "20-library-edits": "20's retags change the songs' file sizes, which getSong, getNowPlaying and the native playlist list report"}}},
+ {"name": "acquisition",
+  "why": "96 rewrites what 95 filed and what 20 left; 20 runs here for what it leaves only (its answers are the library shard's), and 13's first search for Paper Moons' id.",
+  "files": ["95-acquisition", "96-covers-explicit-writes"],
+  "setup": ["13-downloads/setup-ext-song3", "20-library-edits"],
+  "reads": {
+   "96-covers-explicit-writes": {
+    "95-acquisition": "the album 95 files (Zephyr Echo, Glass Harbor) is in the explicit preview and the covers scan",
+    "20-library-edits": "20's trash folder is in the covers scan, and its retags changed the file sizes in the explicit backfill state"}}}
+]

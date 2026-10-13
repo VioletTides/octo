@@ -1,23 +1,109 @@
 name: CI
 
+# Every check a commit must pass: the Rust server (format, clippy, tests, cargo-deny), the shim,
+# octo-sonic, the update helper and the installer, and the C# app that stays in octo/ until it
+# is removed after the Rust release (the migration plan's cleanup). docker.yml calls this before
+# it publishes any image, with the C# job left out: no image holds the C# app.
 on:
   push:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [main]
+  workflow_call:
+    inputs:
+      csharp:
+        description: Also build and test the C# app (octo/, octo.Tests/).
+        type: boolean
+        default: true
+  workflow_dispatch:
 
-# Superseded PR pushes are pointless to finish, so cancel those. Never cancel on
-# main: a run there is the record of whether that commit is good.
+# Superseded PR pushes are pointless to finish, so cancel those. Never cancel on main: a run
+# there is the record of whether that commit is good. github.workflow is the caller's name when
+# docker.yml calls this, so its run never waits behind, or cancels, a push run here.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   DOTNET_VERSION: "9.0.x"
 
 jobs:
-  build-and-test:
+  # The Rust server: the workspace in Cargo.toml, crates/.
+  rust:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # rustup is on the runner; with no argument it installs what rust-toolchain.toml
+      # names (the channel and the rustfmt and clippy components).
+      - name: Rust toolchain
+        run: rustup toolchain install
+
+      # ~/.cargo (registry, git) and target/, keyed on the toolchain, Cargo.lock and the
+      # manifests. Saved only from main, so branches and PRs read that cache but never evict it.
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # ffmpeg for the Radio transcoder, loudness and spectrum tests; fpcalc for the
+      # fingerprint tests; Noto CJK, Symbola and DejaVu, as in the image, so the cover tests
+      # draw names in other scripts with the same fallback fonts. Tests that need a missing
+      # tool skip themselves, so a gap here shows up as a skip, not a failure.
+      - name: Install ffmpeg, fpcalc and cover fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools \
+            fonts-noto-cjk fonts-symbola fonts-dejavu-core
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --tests -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      # octo-sonic (sonic/) sits inside this workspace's folder but is its own project
+      # (exclude in Cargo.toml). If that line goes, cargo refuses to run in sonic/; catch it
+      # here rather than in the sonic job.
+      - name: sonic stays outside the workspace
+        working-directory: sonic
+        run: cargo metadata --format-version 1 --no-deps > /dev/null
+
+  # Licenses, banned or duplicated crates and unknown sources (deny.toml). Advisories run
+  # beside them but do not fail the build: a new RustSec advisory against a dependency is
+  # news to act on, not a fault of the commit that happened to run when it was published.
+  rust-deny:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        checks:
+          - bans licenses sources
+          - advisories
+
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: cargo deny check ${{ matrix.checks }}
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}
+          # The action's container brings its own toolchain; match rust-toolchain.toml.
+          rust-version: "1.99"
+
+  # The C# app (2026.10.05 and earlier) stays in the tree beside the Rust server until it is
+  # removed, so it keeps building and passing its tests until then. docker.yml leaves it out.
+  csharp:
+    if: ${{ inputs.csharp != false }}
     runs-on: ubuntu-latest
 
     steps:
@@ -29,8 +115,10 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Install Radio transcoder
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # ffmpeg for the Radio transcoder; Noto CJK and Symbola, as in the
+      # image, so the cover tests can draw names in other scripts.
+      - name: Install Radio transcoder and cover fonts
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk fonts-symbola
 
       - name: Restore dependencies
         run: dotnet restore
@@ -50,9 +138,10 @@ jobs:
           # only widens the CI cliff; a genuine hang still fails the job.
           DOTNET_HOST_FACTORY_RESOLVER_DEFAULT_TIMEOUT_IN_SECONDS: "600"
 
-  # The shim is Python and its image is only ever built on the deploy host, so
-  # before this job a syntax error in app.py passed CI and was discovered when
-  # the container failed to restart in production. compileall alone justifies
+  # The shim is Python and its image is built only after a merge (docker.yml
+  # publishes it) or on the deploy host, so before this job a syntax error in
+  # app.py passed CI and was discovered when the container failed to restart in
+  # production. compileall alone justifies
   # the two minutes; the gate tests cover the concurrency logic that decides
   # whether a play queues behind background prewarm.
   shim:
@@ -73,5 +162,56 @@ jobs:
       - name: Install test dependencies
         run: pip install -r yt-dlp-shim/requirements-dev.txt
 
-      - name: Gate tests
+      - name: Shim tests
         run: pytest yt-dlp-shim/tests -q
+
+  # octo-sonic, the Sounds alike reader (Rust, bliss-rs over FFmpeg). Nothing else builds its
+  # image, so the image build is checked here too.
+  sonic:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sonic
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: FFmpeg libraries
+        run: sudo apt-get update && sudo apt-get install -y clang pkg-config libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libavfilter-dev libavdevice-dev libswscale-dev
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      - name: Image builds
+        working-directory: .
+        run: docker build ./sonic
+
+  # The update helper runs as root on people's servers and is never built into
+  # an image, so a mistake in it would surface only when someone presses Update
+  # now. shellcheck catches the shell's traps; the test runs it against a
+  # throwaway git origin with Docker faked. The installer rewrites people's .env
+  # on every re-run, so its test checks a re-run keeps everything they set.
+  update-helper:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Shellcheck
+        run: shellcheck -S warning install.sh scripts/*.sh scripts/updater/*.sh
+
+      - name: Update helper tests
+        run: bash scripts/updater/test-updater.sh
+
+      - name: Installer tests
+        run: bash scripts/test-install.sh

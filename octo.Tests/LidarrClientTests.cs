@@ -121,6 +121,8 @@ public class LidarrClientTests
         Assert.Equal(3, add["artist"]!["qualityProfileId"]!.GetValue<int>());
         Assert.Equal(4, add["artist"]!["metadataProfileId"]!.GetValue<int>());
         Assert.Equal("none", add["artist"]!["monitorNewItems"]!.GetValue<string>());
+        Assert.Equal("unknown", add["artist"]!["addOptions"]!["monitor"]!.GetValue<string>());
+        Assert.Equal("mbid", add["artist"]!["addOptions"]!["albumsToMonitor"]![0]!.GetValue<string>());
         var command = handler.Requests.Single(r => r.Method == HttpMethod.Post && r.Path == "/api/v1/command").Body!;
         Assert.Contains("AlbumSearch", command);
         Assert.Contains("42", command);
@@ -150,6 +152,31 @@ public class LidarrClientTests
         Assert.Equal("/existing/Artist", add["artist"]!["path"]!.GetValue<string>());
         Assert.Equal(9, add["artist"]!["qualityProfileId"]!.GetValue<int>());
         Assert.Equal(10, add["artist"]!["metadataProfileId"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task UnmonitoredExistingArtistIsMonitoredAndOtherwiseUnchanged()
+    {
+        var handler = new Handler
+        {
+            Respond = req => (req.Method.Method, req.RequestUri!.AbsolutePath) switch
+            {
+                ("GET", "/api/v1/album") =>
+                    "[{\"id\":12,\"foreignAlbumId\":\"mbid\",\"monitored\":true,\"artist\":{\"id\":7,\"monitored\":false}}]",
+                ("GET", "/api/v1/artist/7") =>
+                    "{\"id\":7,\"monitored\":false,\"monitorNewItems\":\"none\",\"qualityProfileId\":9}",
+                ("PUT", "/api/v1/artist/7") => "{\"id\":7,\"monitored\":true}",
+                ("POST", "/api/v1/command") => "{\"id\":9}",
+                _ => "[]",
+            },
+        };
+
+        await Build(handler).EnsureAlbumAndSearchAsync(Candidate("mbid", "Album", "Artist", 2020));
+
+        var update = JsonNode.Parse(handler.Requests.Single(r => r.Method == HttpMethod.Put).Body!)!;
+        Assert.True(update["monitored"]!.GetValue<bool>());
+        Assert.Equal("none", update["monitorNewItems"]!.GetValue<string>());
+        Assert.Equal(9, update["qualityProfileId"]!.GetValue<int>());
     }
 
     [Fact]
@@ -248,5 +275,59 @@ public class LidarrClientTests
             },
         };
         return new LidarrAlbumCandidate(0, foreignId, title, artist, year, resource);
+    }
+
+    [Fact]
+    public async Task ReleasesAreListedWithTheirQualityAndWhyLidarrRejectsOne()
+    {
+        var handler = new Handler
+        {
+            Respond = req => req.RequestUri!.PathAndQuery == "/api/v1/release?albumId=12"
+                ? """
+                  [{"guid":"a1","indexerId":3,"indexer":"Redacted","title":"Artist - Album (2020) [FLAC]","size":312000000,
+                    "quality":{"quality":{"name":"FLAC"}},"seeders":14,"leechers":1,"protocol":"torrent","ageHours":49.0,
+                    "rejected":false,"rejections":[]},
+                   {"guid":"b2","indexerId":4,"indexer":"NZBgeek","title":"Artist - Album MP3 V0","size":90000000.0,
+                    "quality":{"quality":{"name":"MP3-VBR-V0"}},"protocol":"usenet","age":12,
+                    "rejected":true,"rejections":["Quality is not wanted in profile"]},
+                   {"guid":"","indexerId":5,"title":"no guid"}]
+                  """
+                : "[]",
+        };
+
+        var releases = await Build(handler).ListReleasesAsync(12);
+
+        Assert.Equal(2, releases.Count);
+        var flac = releases[0];
+        Assert.Equal(("a1", 3, "Redacted", "FLAC", 312000000L, 14, 2, false), (flac.Guid, flac.IndexerId, flac.Indexer, flac.Quality, flac.Size, flac.Seeders, flac.AgeDays, flac.Rejected));
+        var mp3 = releases[1];
+        Assert.True(mp3.Rejected);
+        Assert.Equal(90000000L, mp3.Size);
+        Assert.Equal(12, mp3.AgeDays);
+        Assert.Equal(["Quality is not wanted in profile"], mp3.Rejections);
+    }
+
+    [Fact]
+    public async Task APickedReleaseIsGrabbedInsteadOfAnAlbumSearch()
+    {
+        var handler = new Handler
+        {
+            Respond = req => (req.Method.Method, req.RequestUri!.AbsolutePath) switch
+            {
+                ("GET", "/api/v1/album") => "[{\"id\":12,\"foreignAlbumId\":\"mbid\",\"monitored\":true,\"artist\":{\"id\":7,\"monitored\":true}}]",
+                ("POST", "/api/v1/release") => "{\"guid\":\"a1\"}",
+                ("POST", "/api/v1/command") => "{\"id\":9}",
+                _ => "[]",
+            },
+        };
+
+        var started = await Build(handler).StartAlbumSearchAsync(Candidate("mbid", "Album", "Artist", 2020), default,
+            new LidarrReleasePick("a1", 3, "Artist - Album (2020) [FLAC]"));
+
+        Assert.Equal(12, started.AlbumId);
+        Assert.DoesNotContain(handler.Requests, r => r.Path == "/api/v1/command");
+        var grab = JsonNode.Parse(handler.Requests.Single(r => r.Method == HttpMethod.Post && r.Path == "/api/v1/release").Body!)!;
+        Assert.Equal("a1", grab["guid"]!.GetValue<string>());
+        Assert.Equal(3, grab["indexerId"]!.GetValue<int>());
     }
 }

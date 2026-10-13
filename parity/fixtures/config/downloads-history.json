@@ -1,0 +1,56 @@
+[
+  {
+    "Artist": "Zephyr Echo",
+    "Title": "Neon Tide",
+    "Album": "Glass Harbor",
+    "Path": "/music/Zephyr Echo/Glass Harbor (2019)/02 - Neon Tide.flac",
+    "Format": "FLAC",
+    "Source": "Soulseek",
+    "CoverArtUrl": "https://e-cdns-images.dzcdn.net/images/cover/glass/1000x1000-000000-80-0-0.jpg",
+    "SizeBytes": 31457280,
+    "DownloadedAt": "2021-06-03T12:00:00.0000000Z"
+  },
+  {
+    "Artist": "Zephyr Echo",
+    "Title": "Glass Harbor",
+    "Album": "Glass Harbor",
+    "Path": "/music/Zephyr Echo/Glass Harbor (2019)/01 - Glass Harbor.flac",
+    "Format": "FLAC",
+    "Source": "Soulseek",
+    "CoverArtUrl": "https://e-cdns-images.dzcdn.net/images/cover/glass/1000x1000-000000-80-0-0.jpg",
+    "SizeBytes": 33554432,
+    "DownloadedAt": "2021-06-03T11:58:00.0000000Z"
+  },
+  {
+    "Artist": "Aurora Vale",
+    "Title": "Borealis",
+    "Album": "Borealis",
+    "Path": "/music/Aurora Vale/Borealis (2021)/01 - Borealis.mp3",
+    "Format": "MP3",
+    "Source": "YouTube",
+    "CoverArtUrl": "https://coverartarchive.org/release/00000000-0000-4000-8000-00000000c0de/front-500",
+    "SizeBytes": 5242880,
+    "DownloadedAt": "2021-06-02T09:30:00.0000000Z"
+  },
+  {
+    "Artist": "Velvet Static",
+    "Title": "Static Bloom",
+    "Album": "Static Bloom",
+    "Path": "/music/Velvet Static/Static Bloom (2023)/01 - Static Bloom.flac",
+    "Format": "FLAC",
+    "Source": "Soulseek",
+    "SizeBytes": 20971520,
+    "DownloadedAt": "2021-06-01T08:00:00.0000000Z"
+  },
+  {
+    "Artist": "Velvet Static",
+    "Title": "Glow Wire",
+    "Album": "Low Hum",
+    "Path": "/music/Velvet Static/Low Hum (2022)/02 - Glow Wire.flac",
+    "Format": "FLAC",
+    "Source": "Soulseek",
+    "CoverArtUrl": "not a web address",
+    "SizeBytes": 18874368,
+    "DownloadedAt": "2021-05-31T08:00:00.0000000Z"
+  }
+]

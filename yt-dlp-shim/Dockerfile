@@ -44,18 +44,20 @@ RUN set -eux; \
     chmod +x /usr/local/bin/deno; \
     deno --version
 
-RUN pip install --no-cache-dir flask gunicorn requests
+RUN pip install --no-cache-dir flask gunicorn requests "ytmusicapi>=1.12,<2"
 
-# gate.py too, not just app.py -- app.py imports it at module scope, so omitting
-# it here is a ModuleNotFoundError at startup and total loss of playback. The
-# shim image is never built in CI, so nothing else would catch that.
-COPY app.py gate.py /app/
+# facts.py, gate.py, loudness.py and ytm.py too, not just app.py -- app.py imports them at module scope, so omitting
+# one here is a ModuleNotFoundError at startup and total loss of playback. CI
+# builds this image only to publish it, after a merge, so no pull request
+# check would catch that.
+COPY app.py facts.py gate.py loudness.py ytm.py /app/
 
 EXPOSE 8080
 
-# Single worker, threaded — yt-dlp is the bottleneck not Python; threading is fine.
+# Single worker, threaded: yt-dlp is the bottleneck, not Python, so threading is fine.
 # Threads are sized well above MAX_CONCURRENT_YTDLP deliberately: /stream holds
 # its thread for the whole song, so at 8 threads a few simultaneous playbacks
 # could consume the worker and leave gate slots idle with nobody able to reach
 # them. A thread parked on a socket read costs a stack and nothing else.
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "-w", "1", "--threads", "32", "--timeout", "120", "app:app"]
+# SHIM_THREADS sets the count (128 by default), room for a whole family playing at once.
+CMD ["sh", "-c", "exec gunicorn -b 0.0.0.0:8080 -w 1 --threads ${SHIM_THREADS:-128} --timeout 120 app:app"]

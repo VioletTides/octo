@@ -1,0 +1,113 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# octo-sonic (sonic/) is its own project: its own Cargo.lock, edition and toolchain floor, FFmpeg
+# libraries to build against, and a Docker build whose context is sonic/ alone. Without this,
+# cargo run inside sonic/ finds this workspace above it and refuses a package that is not a
+# member.
+exclude = ["sonic"]
+
+[workspace.package]
+# Not the release the dashboard shows: CARGO_PKG_VERSION cannot hold the leading zero of
+# 2026.10.05. That comes from OCTO_VERSION at build time, else the root VERSION file, else the
+# C# app's octo/octo.csproj while both builds live side by side (crates/octo-core/build.rs).
+version = "2026.10.5"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-only"
+publish = false
+
+[workspace.dependencies]
+octo-core = { path = "crates/octo-core" }
+octo-subsonic = { path = "crates/octo-subsonic" }
+octo-media = { path = "crates/octo-media" }
+
+anyhow = "1"
+any_ascii = "0.3"
+arc-swap = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros", "multipart"] }
+base64 = "0.23"
+bytes = "1"
+chacha20poly1305 = "0.11"
+brotli = "8"
+chrono = { version = "0.4", features = ["serde"] }
+flate2 = "1"
+futures = "0.3"
+hex = "0.4"
+http = "1"
+http-body-util = "0.1"
+httpdate = "1"
+if-addrs = "0.15"
+indexmap = { version = "2", features = ["serde"] }
+ipnet = { version = "2.12", features = ["serde"] }
+md-5 = "0.11"
+mime_guess = "2"
+notify = "8"
+parking_lot = "0.12"
+percent-encoding = "2"
+quick-xml = "0.42"
+rand = "0.10"
+rapidfuzz = "0.5"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "gzip", "deflate", "rustls", "multipart", "form", "query", "charset", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "raw_value"] }
+serde_repr = "0.1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", features = ["cors", "fs", "trace", "set-header"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+unicode-general-category = "1"
+unicode-normalization = "0.1"
+unicode-script = "0.5"
+unicode-segmentation = "1"
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Media
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+lofty = "0.25"
+tiny-skia = "0.12"
+cosmic-text = "0.19"
+
+# Tests
+insta = { version = "1", features = ["json"] }
+tempfile = "3"
+wiremock = "0.6"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# The port keeps the C# shapes where that makes the two easy to read side by side.
+too_many_arguments = "allow"
+type_complexity = "allow"
+large_enum_variant = "allow"
+
+[profile.dev]
+# Line tables only: enough for panics to name a line, and a fraction of the disk.
+debug = "line-tables-only"
+# Incremental builds stay on (cargo's default for dev). Each worktree builds into its own
+# target/ and must not share one CARGO_TARGET_DIR with another: an incremental cache is a few
+# gigabytes per worktree, and one shared by several worktrees is what once filled the disk.
+
+[profile.dev.package."*"]
+# Cover rendering and image decoding are unbearably slow unoptimised, even in tests.
+opt-level = 2
+debug = false
+
+[profile.dev.package.octo-media]
+# The list-cover veil and resampling are per-pixel maths over up to 1.44 million pixels; the
+# cover timing test (ListCoverTests' ACover_DrawsQuickly) only means something optimised.
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "symbols"

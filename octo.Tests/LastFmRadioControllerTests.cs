@@ -175,6 +175,78 @@ public sealed class LastFmRadioControllerTests
     }
 
     [Fact]
+    public async Task OutsideSongScrobble_IsNotRelayedToNavidrome_ButStillLearned()
+    {
+        // Issue #60: Navidrome has no such media, logs "data not found" per play, and answers
+        // ok anyway. Octo answers for it; the play still reaches radio and ListenBrainz.
+        await using var fixture = new RadioWebFactory();
+        var registry = fixture.Services.GetRequiredService<ExternalIdRegistry>();
+        var externalId = registry.Register(new SoulseekRouting
+            { Kind = RoutingKind.Song, Artist = "Phonk", Title = "Zericxxn - Raya", Duration = 151 });
+        using var client = fixture.CreateClient();
+
+        foreach (var format in new[] { "json", "xml" })
+        {
+            using var nowPlaying = await client.GetAsync(
+                $"/rest/scrobble?u=alice&t=token&s=salt&f={format}&id={externalId}&submission=false");
+            nowPlaying.EnsureSuccessStatusCode();
+            var body = await nowPlaying.Content.ReadAsStringAsync();
+            Assert.Contains(format == "json" ? "\"status\":\"ok\"" : "status=\"ok\"", body);
+        }
+        using var played = await client.GetAsync(
+            $"/rest/scrobble?u=alice&t=token&s=salt&f=json&id={externalId}&submission=true");
+        played.EnsureSuccessStatusCode();
+
+        Assert.Equal(0, fixture.Handler.ScrobbleRelays);
+        Assert.Single(fixture.State.GetUser("alice").Plays);
+        Assert.Single(fixture.Handler.ListenBrainzSubmissions);
+    }
+
+    [Fact]
+    public async Task ScrobbleBatch_RelaysOnlyLibrarySongs_WithTheirOwnTimes()
+    {
+        await using var fixture = new RadioWebFactory();
+        var registry = fixture.Services.GetRequiredService<ExternalIdRegistry>();
+        var externalId = registry.Register(new SoulseekRouting
+            { Kind = RoutingKind.Song, Artist = "Phonk", Title = "Zericxxn - Raya", Duration = 151 });
+        using var client = fixture.CreateClient();
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var (first, second) = ((now - 300_000).ToString(), now.ToString());
+
+        using var response = await client.PostAsync("/rest/scrobble", new FormUrlEncodedContent(new[]
+        {
+            new KeyValuePair<string,string>("u", "alice"), new("t", "token"), new("s", "salt"), new("f", "json"),
+            new("id", externalId), new("id", "one"),
+            new("submission", "true"), new("submission", "true"),
+            new("time", first), new("time", second),
+        }));
+        response.EnsureSuccessStatusCode();
+
+        Assert.Equal(["one"], fixture.Handler.RelayedScrobbleIds);
+        Assert.Equal([second], fixture.Handler.RelayedScrobbleTimes);
+        Assert.Equal(2, fixture.State.GetUser("alice").Plays.Count);
+        Assert.Single(fixture.Handler.ListenBrainzSubmissions);
+    }
+
+    [Fact]
+    public async Task OutsideSongScrobble_WithWrongCredentials_LearnsAndSubmitsNothing()
+    {
+        // Navidrome's answer to the relayed scrobble was the only credential check. With no
+        // relay, a ping has to stand in, or anyone could post listens under any name.
+        await using var fixture = new RadioWebFactory();
+        var registry = fixture.Services.GetRequiredService<ExternalIdRegistry>();
+        var externalId = registry.Register(new SoulseekRouting
+            { Kind = RoutingKind.Song, Artist = "Phonk", Title = "Zericxxn - Raya", Duration = 151 });
+        using var client = fixture.CreateClient();
+
+        var body = await client.GetStringAsync($"/rest/scrobble?u=bad&f=json&id={externalId}&submission=true");
+
+        Assert.Contains("failed", body);
+        Assert.Empty(fixture.State.GetUser("bad").Plays);
+        Assert.Empty(fixture.Handler.ListenBrainzSubmissions);
+    }
+
+    [Fact]
     public async Task AuthenticationFailure_DoesNotExposeStationsOrLearnScrobbles()
     {
         await using var fixture = new RadioWebFactory();
@@ -402,7 +474,9 @@ public sealed class LastFmRadioControllerTests
             .GetProperty("internetRadioStations").GetProperty("internetRadioStation")
             .EnumerateArray().Single(item => item.GetProperty("name").GetString() == "Your Mix")
             .GetProperty("streamUrl").GetString()!;
-
+        // The listing answered only once its starter was ready and attached to this URL.
+        // The refreshed songs resolve and play, but every new transcode waits at the gate,
+        // so the first bytes can only come from the starter the listing published.
         fixture.InstallStation(" Refreshed");
         fixture.Transcoder.ResetStarted();
         fixture.Transcoder.BeforeWriteGate = NewGate();
@@ -461,8 +535,12 @@ public sealed class LastFmRadioControllerTests
         await stream.ReadExactlyAsync(bytes);
         Assert.Equal("MP3", Encoding.ASCII.GetString(bytes));
         Assert.Equal(192, fixture.Transcoder.LastBitrateKbps);
-        for (var attempt = 0; attempt < 50 && fixture.State.GetUser("alice").Plays.Count == 0;
-             attempt++)
+        // The play and its relayed scrobble are recorded off the streaming request. Waited for
+        // together, up to ten seconds: half a second for the play and no wait for the scrobble
+        // failed whenever the whole suite was loading the machine.
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline
+               && (fixture.State.GetUser("alice").Plays.Count == 0 || fixture.Handler.RelayedScrobbleIds.Count == 0))
             await Task.Delay(10);
         Assert.NotEmpty(fixture.State.GetUser("alice").Plays);
         Assert.NotEmpty(fixture.Handler.RelayedScrobbleIds);
@@ -645,17 +723,31 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
     private readonly bool _exposeStreams;
     private readonly bool _enableIcyMetadata;
     private readonly int? _starterPublishTimeoutSeconds;
+    private readonly bool _lastFmScrobbling;
+    private readonly bool _lastFmLibraryPlays;
+
+    /// <summary>The settings file Octo writes, kept in this fixture's own folder rather than
+    /// /app/config, where a test run has no business writing.</summary>
+    public string SettingsPath => Path.Combine(_directory, "settings.json");
 
     public RadioWebFactory(string explicitFilter = "All", bool exposePlaylists = true,
         bool exposeStreams = true, bool enableIcyMetadata = true,
-        int? starterPublishTimeoutSeconds = null)
+        int? starterPublishTimeoutSeconds = null, bool lastFmScrobbling = false,
+        bool lastFmLibraryPlays = true)
     {
+        _lastFmScrobbling = lastFmScrobbling;
+        _lastFmLibraryPlays = lastFmLibraryPlays;
         _explicitFilter = explicitFilter;
         _exposePlaylists = exposePlaylists;
         _exposeStreams = exposeStreams;
         _enableIcyMetadata = enableIcyMetadata;
         _starterPublishTimeoutSeconds = starterPublishTimeoutSeconds;
         Directory.CreateDirectory(_directory);
+        // No external match is an empty list, as the real services answer. Moq's default
+        // for a List is null, which turned every unmatched song into a NullReferenceException.
+        Metadata.Setup(service => service.SearchSongsByArtistTitleAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int?>()))
+            .ReturnsAsync([]);
         Metadata.Setup(service => service.PrewarmYouTubeIdsAsync(
                 It.IsAny<IEnumerable<Octo.Models.Domain.Song>>(), It.IsAny<int>(),
                 It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
@@ -706,6 +798,19 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        var lastFm = _lastFmScrobbling
+            ? new Dictionary<string, string?>
+            {
+                // Only when asked for: with a key, radio would start calling Last.fm too.
+                ["LastFm:ApiKey"] = FakeLastFm.ApiKey,
+                ["LastFm:ApiSecret"] = FakeLastFm.Secret,
+                ["LastFm:ScrobbleLibraryPlays"] = _lastFmLibraryPlays.ToString(),
+                ["LastFm:UserSessions:bob:SessionKey"] = "sk-bob",
+                ["LastFm:UserSessions:bob:LastFmUser"] = "lfm-bob",
+                // Fails the fixture's credential check, so a session for it must still send nothing.
+                ["LastFm:UserSessions:bad:SessionKey"] = "sk-bad",
+            }
+            : [];
         builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
             new Dictionary<string, string?>
             {
@@ -716,6 +821,7 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
                 ["Subsonic:AutoDetectDownloadPath"] = "false",
                 ["Subsonic:ExplicitFilter"] = _explicitFilter,
                 ["Library:DownloadPath"] = _directory,
+                ["Octo:StateDirectory"] = _directory,
                 ["LastFm:EnableRadio"] = "true",
                 ["LastFm:EnablePersonalizedStations"] = "true",
                 ["LastFm:EnableDiscoveryStations"] = "true",
@@ -723,7 +829,7 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
                 ["LastFm:ExposeRadioAsStreams"] = _exposeStreams.ToString(),
                 ["LastFm:RadioStreamBitrateKbps"] = "192",
                 ["LastFm:EnableIcyMetadata"] = _enableIcyMetadata.ToString(),
-            }));
+            }.Concat(lastFm)));
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<IHostedService>();
@@ -737,6 +843,8 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
             services.AddSingleton<ILastFmRadioAudioTranscoder>(Transcoder);
             services.RemoveAll<LastFmRadioTrackCache>();
             services.AddSingleton(new LastFmRadioTrackCache(Path.Combine(_directory, "radio-cache")));
+            services.RemoveAll<Octo.Services.Admin.SettingsFileWriter>();
+            services.AddSingleton(new Octo.Services.Admin.SettingsFileWriter(SettingsPath));
             services.RemoveAll<LastFmRadioStateStore>();
             services.AddSingleton(provider => new LastFmRadioStateStore(
                 Path.Combine(_directory, "radio-state.json"),
@@ -796,12 +904,32 @@ internal sealed class RadioWebFactory : WebApplicationFactory<Program>
 internal sealed class RadioUpstreamHandler : HttpMessageHandler
 {
     public IReadOnlyList<string> RelayedScrobbleIds { get; private set; } = [];
+    public IReadOnlyList<string> RelayedScrobbleTimes { get; private set; } = [];
+    public int ScrobbleRelays { get; private set; }
     public bool ReturnLocalMatches { get; set; } = true;
     public List<(string Authorization, string Body)> ListenBrainzSubmissions { get; } = [];
+    public FakeLastFm LastFm { get; } = new();
+
+    /// <summary>API keys Navidrome knows, and whose each is. Any other key fails every call.</summary>
+    public Dictionary<string, string> ApiKeys { get; } = new(StringComparer.Ordinal) { ["bob-key"] = "bob" };
+
+    /// <summary>When set, tokenInfo fails though the key itself is accepted.</summary>
+    public bool TokenInfoFails { get; set; }
+
+    public int TokenInfoCalls => Volatile.Read(ref _tokenInfoCalls);
+    private int _tokenInfoCalls;
+
+    /// <summary>How long tokenInfo takes to answer.</summary>
+    public TimeSpan TokenInfoDelay { get; set; }
+
+    /// <summary>How many getSong calls fail with a 503 before they answer again.</summary>
+    public int GetSongFailures { get; set; }
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
         CancellationToken cancellationToken)
     {
+        if (request.RequestUri!.Host.Equals("ws.audioscrobbler.com", StringComparison.OrdinalIgnoreCase))
+            return await LastFm.RespondAsync(request, cancellationToken);
         if (request.RequestUri!.Host.Equals("api.listenbrainz.org", StringComparison.OrdinalIgnoreCase))
         {
             var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
@@ -826,11 +954,33 @@ internal sealed class RadioUpstreamHandler : HttpMessageHandler
         var format = query["f"] ?? "json";
         var username = query["u"] ?? "";
         if (username == "bad") return Result(format == "xml" ? FailedXml() : FailedJson());
+        // Navidrome's API key sign-in: an unknown key fails, and u beside a key is refused.
+        if (query["apiKey"] is { } apiKey && (!ApiKeys.ContainsKey(apiKey) || username.Length > 0))
+            return Result(format == "xml" ? FailedXml() : FailedJson());
+        if (path.Equals("rest/tokenInfo", StringComparison.OrdinalIgnoreCase))
+        {
+            Interlocked.Increment(ref _tokenInfoCalls);
+            var answer = Result(TokenInfoFails || query["apiKey"] is not { } key
+                ? FailedJson()
+                : OkJson($"\"tokenInfo\":{{\"username\":\"{ApiKeys[key]}\"}}"));
+            return TokenInfoDelay > TimeSpan.Zero
+                ? Task.Delay(TokenInfoDelay).ContinueWith(_ => answer).Unwrap()
+                : answer;
+        }
 
         if (path.Equals("rest/scrobble", StringComparison.OrdinalIgnoreCase))
+        {
+            ScrobbleRelays++;
             RelayedScrobbleIds = query.GetValues("id") ?? [];
+            RelayedScrobbleTimes = query.GetValues("time") ?? [];
+        }
         if (path.Equals("rest/getSong", StringComparison.OrdinalIgnoreCase))
         {
+            if (GetSongFailures > 0)
+            {
+                GetSongFailures--;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+            }
             var id = query["id"] ?? "song";
             return Result(OkJson($"\"song\":{{\"id\":\"{id}\",\"artist\":\"Artist {id}\",\"title\":\"Title {id}\",\"album\":\"Album {id}\",\"genre\":\"Rock\",\"duration\":180}}"));
         }
@@ -842,9 +992,17 @@ internal sealed class RadioUpstreamHandler : HttpMessageHandler
             var ordinal = search.Contains("Four", StringComparison.OrdinalIgnoreCase) ? "four"
                 : search.Contains("Three", StringComparison.OrdinalIgnoreCase) ? "three"
                 : search.Contains("Two", StringComparison.OrdinalIgnoreCase) ? "two" : "one";
-            var id = "local-" + ordinal;
-            var artist = "Artist " + char.ToUpperInvariant(ordinal[0]) + ordinal[1..];
-            var title = "Song " + char.ToUpperInvariant(ordinal[0]) + ordinal[1..];
+            // Answer with the recording that was asked for. This fake used to answer "New Artist
+            // One - New Song One" with "Artist One - Song One", which only matched because radio
+            // compared artists by substring, the bug that played a different owned song.
+            // The same goes for a refreshed station's "Song Two Refreshed": answering "Song Two"
+            // only matched while titles were compared by prefix, and now resolves nowhere.
+            var prefix = search.StartsWith("New ", StringComparison.OrdinalIgnoreCase) ? "New " : "";
+            var suffix = search.EndsWith(" Refreshed", StringComparison.OrdinalIgnoreCase) ? " Refreshed" : "";
+            var id = "local-" + (prefix.Length > 0 ? "new-" : "") + ordinal
+                + (suffix.Length > 0 ? "-refreshed" : "");
+            var artist = prefix + "Artist " + char.ToUpperInvariant(ordinal[0]) + ordinal[1..];
+            var title = prefix + "Song " + char.ToUpperInvariant(ordinal[0]) + ordinal[1..] + suffix;
             return Result(OkJson($"\"searchResult3\":{{\"song\":[{{\"id\":\"{id}\",\"artist\":\"{artist}\",\"title\":\"{title}\",\"album\":\"Album\",\"duration\":180}}]}}"));
         }
         if (path.Equals("rest/getPlaylists", StringComparison.OrdinalIgnoreCase))
